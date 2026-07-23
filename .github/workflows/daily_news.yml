@@ -1,0 +1,43 @@
+name: Daily News Video
+
+on:
+  schedule:
+    # Runs at 12:00 UTC every day (~7am Central during CDT / 6am during CST).
+    # Adjust the hour below and remember GitHub Actions cron is always UTC.
+    - cron: "0 12 * * *"
+  workflow_dispatch: {}   # lets you also trigger it manually from the Actions tab
+
+jobs:
+  build-video:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ffmpeg + fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-dejavu-core
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate today's video
+        working-directory: src
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python main.py --count 5 --output-dir ../output --tmp-dir ../tmp
+
+      - name: Upload video + script as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-news-video-${{ github.run_number }}
+          path: output/
+          retention-days: 14
