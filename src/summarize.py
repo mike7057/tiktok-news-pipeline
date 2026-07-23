@@ -38,6 +38,18 @@ All 3 parts must together read naturally as one continuous mini-story, each writ
 in your own words - never copy phrasing from the source snippet. No "Story #1:" labels, no \
 preamble - just the lines themselves.
 
+IMPORTANT - if a source snippet/candidate is itself a review or opinion piece (not a \
+factual news event), do not present that individual reviewer's personal verdict as an \
+established fact or as this video's own conclusion - you are reporting on news/reception, \
+not delivering your own review, and you never played or evaluated the thing yourself. \
+Instead:
+  - Lead with objective, checkable elements: scores/ratings (e.g. "sitting at 81 on \
+Metacritic"), confirmed features, release details, or claims the piece states as fact \
+rather than opinion.
+  - If you convey sentiment, frame it as general reception, not one reviewer's individual \
+take ("critics are split on whether it justifies a remake" rather than "the reviewer \
+feels..." or a bare claim like "it's hard to recommend" stated as if it's just true).
+
 Return ONLY a JSON array of objects, one per story, in the same order given, each shaped like:
   {{"parts": ["hook line", "detail line 1", "detail line 2"]}}
 No markdown formatting, no code fences, no extra commentary - just the raw JSON array."""
@@ -119,6 +131,18 @@ context, implications, or what happens next
 
 All 3 parts must together read naturally as one continuous mini-story, each written entirely \
 in your own words - never copy phrasing from the snippet.
+
+IMPORTANT - if a source snippet/candidate is itself a review or opinion piece (not a \
+factual news event), do not present that individual reviewer's personal verdict as an \
+established fact or as this video's own conclusion - you are reporting on news/reception, \
+not delivering your own review, and you never played or evaluated the thing yourself. \
+Instead:
+  - Lead with objective, checkable elements: scores/ratings (e.g. "sitting at 81 on \
+Metacritic"), confirmed features, release details, or claims the piece states as fact \
+rather than opinion.
+  - If you convey sentiment, frame it as general reception, not one reviewer's individual \
+take ("critics are split on whether it justifies a remake" rather than "the reviewer \
+feels..." or a bare claim like "it's hard to recommend" stated as if it's just true).
 
 Return ONLY a JSON array of exactly {desired_count} objects, ordered most-to-least significant, \
 each shaped like:
