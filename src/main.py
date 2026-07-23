@@ -1,9 +1,10 @@
 """
 Orchestrates the full daily pipeline:
   1. Fetch top 5 headlines (Google News RSS - free)
-  2. Summarize each into a short voiceover line (Claude API)
-  3. Render narration audio for each line (edge-tts - free)
-  4. Assemble everything into one vertical video (moviepy + ffmpeg)
+  2. Summarize each into a 3-part script (hook + 2 detail lines) via Claude API
+  3. Render narration audio for each of the 3 parts per story (edge-tts - free)
+  4. Assemble everything into one vertical video, 3 tiles per story
+     (moviepy + ffmpeg)
 
 Usage:
     python main.py                  # top 5 general news
@@ -29,6 +30,7 @@ from fetch_news import (
 from generate_audio import generate_audio
 from summarize import select_and_summarize, summarize_stories
 
+# Topics with a dedicated Google News section - broad categories only
 TOPIC_FEEDS = {
     "world": "https://news.google.com/rss/headlines/section/topic/WORLD?hl=en-US&gl=US&ceid=US:en",
     "business": "https://news.google.com/rss/headlines/section/topic/BUSINESS?hl=en-US&gl=US&ceid=US:en",
@@ -39,6 +41,11 @@ TOPIC_FEEDS = {
     "health": "https://news.google.com/rss/headlines/section/topic/HEALTH?hl=en-US&gl=US&ceid=US:en",
 }
 
+# Niches without a dedicated Google News section AND without a good direct-publisher
+# feed set wired up yet - built via keyword search as a fallback. Note: Google's
+# search-based RSS skews toward older/archival results (median item age observed
+# around 6-7 days), so prefer adding a MULTI_FEED_TOPICS entry over this when
+# freshness matters for a given niche.
 SEARCH_TOPIC_QUERIES = {
     "crypto": "crypto OR cryptocurrency OR bitcoin",
     "ai": '"artificial intelligence" OR AI',
@@ -46,10 +53,9 @@ SEARCH_TOPIC_QUERIES = {
 
 
 def resolve_feed_url(topic: str | None, query: str | None) -> str | None:
-    """Priority: explicit --query > fixed topic sections > search-based niche
-    topics > None (general feed). Note: MULTI_FEED_TOPICS (e.g. gaming) is
-    handled separately in run() since it aggregates several feeds rather than
-    resolving to one URL."""
+    """Priority: explicit --query > fixed topic sections > search-based niche topics > None (general feed).
+    Note: MULTI_FEED_TOPICS (e.g. gaming) is handled separately in run() since it
+    aggregates several feeds rather than resolving to one URL."""
     if query:
         return build_search_feed_url(query)
     if topic and topic in TOPIC_FEEDS:
@@ -84,7 +90,7 @@ def run(count: int, topic: str | None, query: str | None, output_dir: str, tmp_d
             sys.exit(1)
 
         stories = [sel["story"] for sel in selections]
-        script_lines = [sel["script"] for sel in selections]
+        parts_lists = [sel["parts"] for sel in selections]
 
         print("    Selected:")
         for i, s in enumerate(stories, 1):
@@ -103,24 +109,30 @@ def run(count: int, topic: str | None, query: str | None, output_dir: str, tmp_d
             print(f"    {i}. {s['title']} ({s['source']})")
 
         print("[2/4] Summarizing with Claude...")
-        script_lines = summarize_stories(stories)
+        parts_lists = summarize_stories(stories)
 
     print("[3/4] Generating narration audio...")
     os.makedirs(tmp_dir, exist_ok=True)
-    audio_paths = []
-    for i, line in enumerate(script_lines):
-        audio_path = os.path.join(tmp_dir, f"narration_{i}.mp3")
-        generate_audio(line, audio_path)
-        audio_paths.append(audio_path)
-        print(f"    Rendered audio {i + 1}/{len(script_lines)}")
+    audio_paths_lists = []
+    total_parts = sum(len(p) for p in parts_lists)
+    rendered = 0
+    for i, parts in enumerate(parts_lists):
+        story_audio_paths = []
+        for j, part_text in enumerate(parts):
+            audio_path = os.path.join(tmp_dir, f"narration_{i}_{j}.mp3")
+            generate_audio(part_text, audio_path)
+            story_audio_paths.append(audio_path)
+            rendered += 1
+            print(f"    Rendered audio {rendered}/{total_parts}")
+        audio_paths_lists.append(story_audio_paths)
 
     print("[4/4] Assembling video...")
     os.makedirs(output_dir, exist_ok=True)
     video_path = os.path.join(output_dir, f"top{count}_{today}.mp4")
     assemble_video(
         stories,
-        script_lines,
-        audio_paths,
+        parts_lists,
+        audio_paths_lists,
         output_path=video_path,
         tmp_dir=tmp_dir,
         video_title=f"Top {count} News Today",
@@ -131,9 +143,11 @@ def run(count: int, topic: str | None, query: str | None, output_dir: str, tmp_d
     # or add a caption before posting
     script_path = os.path.join(output_dir, f"top{count}_{today}_script.txt")
     with open(script_path, "w") as f:
-        for i, (s, line) in enumerate(zip(stories, script_lines), 1):
+        for i, (s, parts) in enumerate(zip(stories, parts_lists), 1):
             f.write(f"{i}. {s['title']}\n   Source: {s['source']}\n   Link: {s['link']}\n")
-            f.write(f"   Script: {line}\n\n")
+            f.write(f"   Hook: {parts[0]}\n")
+            f.write(f"   Detail 1: {parts[1]}\n")
+            f.write(f"   Detail 2: {parts[2]}\n\n")
 
     print(f"\nDone.\n  Video:  {video_path}\n  Script: {script_path}")
 
@@ -150,12 +164,12 @@ if __name__ == "__main__":
         "--topic",
         choices=list(TOPIC_FEEDS.keys()) + list(SEARCH_TOPIC_QUERIES.keys()) + list(MULTI_FEED_TOPICS.keys()),
         default=None,
-        help="Optional topic filter (default: general/world mix)",
+        help="Preset topic filter (default: general/world mix). Includes niche topics like 'gaming'.",
     )
     parser.add_argument(
         "--query",
         default=None,
-        help="Custom Google News search query, e.g. --query 'Nintendo OR PlayStation'. "
+        help='Custom Google News search query, e.g. --query \'Nintendo OR PlayStation\'. '
         "Overrides --topic if both are given.",
     )
     parser.add_argument("--output-dir", default="../output", help="Where to save final files")

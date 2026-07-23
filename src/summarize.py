@@ -1,7 +1,12 @@
 """
-Turns raw headlines + RSS snippets into short, original voiceover lines
+Turns raw headlines + RSS snippets into short, original voiceover scripts
 using the Claude API. Uses Haiku since this is a simple, short task and
 keeps per-run cost tiny (a handful of cents at most for 5 stories/day).
+
+Each story becomes 3 script parts, matching the 3-tile video format:
+  parts[0] = hook       - one short sentence, read on the title tile
+  parts[1] = detail_1   - one to two sentences, read on tile 2
+  parts[2] = detail_2   - one to two sentences, read on tile 3
 """
 
 import json
@@ -15,20 +20,41 @@ load_dotenv()
 
 MODEL = "claude-haiku-4-5-20251001"
 
-SYSTEM_PROMPT = """You write short voiceover scripts for a daily 60-second TikTok \
-news recap video called "Top 5 Today".
+SYSTEM_PROMPT = """You write short voiceover scripts for a daily TikTok news recap video. \
+Each story gets its own 3-screen mini-segment:
+  - a title screen (just the headline, shown on screen - you don't write this part)
+  - a "hook" line, read aloud right under the headline
+  - two follow-up "detail" lines, each shown on its own screen after that
 
-For EACH story you're given, write ONE 2-sentence script line that:
-- Explains what happened and why it matters, in plain, conversational spoken language
-- Is written entirely in your own words - never copy phrasing from the source snippet
-- Is short enough to read aloud in about 8-10 seconds (roughly 25-35 words)
-- Has no headline restated verbatim, no "Story #1:", no preamble - just the line itself
+For EACH story you're given, write a "parts" array of exactly 3 strings:
+  1. hook - ONE short sentence (roughly 10-15 words, ~4-5 seconds read aloud) that \
+restates or introduces the headline conversationally - not a verbatim repeat of the headline
+  2. detail_1 - one to two sentences (roughly 25-35 words, ~8-10 seconds read aloud) giving \
+more specifics about what happened
+  3. detail_2 - one to two sentences (roughly 25-35 words, ~8-10 seconds read aloud) adding \
+context, implications, or what happens next
 
-Return ONLY a JSON array of strings, one per story, in the same order given.
+All 3 parts must together read naturally as one continuous mini-story, each written entirely \
+in your own words - never copy phrasing from the source snippet. No "Story #1:" labels, no \
+preamble - just the lines themselves.
+
+Return ONLY a JSON array of objects, one per story, in the same order given, each shaped like:
+  {{"parts": ["hook line", "detail line 1", "detail line 2"]}}
 No markdown formatting, no code fences, no extra commentary - just the raw JSON array."""
 
 
-def summarize_stories(stories: list[dict], api_key: str | None = None) -> list[str]:
+def _parse_json_response(text: str):
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("```")[1]
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.strip()
+    return json.loads(text)
+
+
+def summarize_stories(stories: list[dict], api_key: str | None = None) -> list[list[str]]:
+    """Returns a list of 3-part script lists, one per story, same order as `stories`."""
     client = Anthropic(api_key=api_key or os.environ["ANTHROPIC_API_KEY"])
 
     stories_text = "\n\n".join(
@@ -40,29 +66,24 @@ def summarize_stories(stories: list[dict], api_key: str | None = None) -> list[s
 
     response = client.messages.create(
         model=MODEL,
-        max_tokens=1024,
+        max_tokens=2048,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": stories_text}],
     )
 
-    text = response.content[0].text.strip()
+    parsed = _parse_json_response(response.content[0].text)
 
-    # Strip accidental code-fence wrapping, just in case
-    if text.startswith("```"):
-        text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
-        text = text.strip()
+    if len(parsed) != len(stories):
+        raise ValueError(f"Expected {len(stories)} entries back, got {len(parsed)}. Raw: {parsed}")
 
-    summaries = json.loads(text)
+    parts_lists = []
+    for entry in parsed:
+        parts = entry["parts"]
+        if len(parts) != 3:
+            raise ValueError(f"Expected exactly 3 parts, got {len(parts)}: {parts}")
+        parts_lists.append(parts)
 
-    if len(summaries) != len(stories):
-        raise ValueError(
-            f"Expected {len(stories)} summaries back, got {len(summaries)}. "
-            f"Raw response: {text}"
-        )
-
-    return summaries
+    return parts_lists
 
 
 SELECT_SYSTEM_PROMPT = """You are selecting stories for a daily Top-{desired_count} gaming news \
@@ -83,26 +104,40 @@ story about a minor patch note matters less than a single-source story about a m
 or franchise announcement. Do not just default to the most recent items - prioritize genuine \
 significance over recency.
 
-For each selected story, write ONE 2-sentence voiceover line that:
-- Explains what happened and why it matters, in plain conversational spoken language
-- Is written entirely in your own words - never copy phrasing from the snippet
-- Is short enough to read aloud in about 8-10 seconds (roughly 25-35 words)
-- Has no "Story #1:" label, no restated headline - just the line itself
+Each selected story gets its own 3-screen mini-segment in the video:
+  - a title screen (just the headline, shown on screen - you don't write this part)
+  - a "hook" line, read aloud right under the headline
+  - two follow-up "detail" lines, each shown on its own screen after that
+
+For each selected story, write a "parts" array of exactly 3 strings:
+  1. hook - ONE short sentence (roughly 10-15 words, ~4-5 seconds read aloud) that \
+restates or introduces the headline conversationally - not a verbatim repeat of the headline
+  2. detail_1 - one to two sentences (roughly 25-35 words, ~8-10 seconds read aloud) giving \
+more specifics about what happened
+  3. detail_2 - one to two sentences (roughly 25-35 words, ~8-10 seconds read aloud) adding \
+context, implications, or what happens next
+
+All 3 parts must together read naturally as one continuous mini-story, each written entirely \
+in your own words - never copy phrasing from the snippet.
 
 Return ONLY a JSON array of exactly {desired_count} objects, ordered most-to-least significant, \
-each shaped like: {{"index": <candidate's 0-based position in the input list>, "script": "..."}}
+each shaped like:
+  {{"index": <candidate's 0-based position in the input list>, "parts": ["hook line", "detail line 1", "detail line 2"]}}
 No markdown formatting, no code fences, no extra commentary - just the raw JSON array."""
 
 
-def select_and_summarize(candidates: list[dict], desired_count: int = 5, api_key: str | None = None) -> list[dict]:
+def select_and_summarize(
+    candidates: list[dict], desired_count: int = 5, api_key: str | None = None
+) -> list[dict]:
     """
     Given a larger candidate pool (e.g. 20 stories from fetch_from_multiple_feeds,
-    each with a coverage_count), asks Claude to pick the desired_count most
-    significant ones and write a script line for each.
+    each with a coverage_count), asks Claude to pick the `desired_count` most
+    significant ones and write a 3-part script for each.
 
-    Returns [{"story": <original candidate dict>, "script": "..."}], ordered
-    most-to-least significant. Uses index-based selection (Claude returns the
-    candidate's position number) rather than matching by title text, since
+    Returns a list of dicts: [{"story": <original candidate dict>, "parts": [p1, p2, p3]}],
+    ordered most-to-least significant, length == desired_count (or fewer if the
+    candidate pool itself was smaller). Uses index-based selection (Claude returns
+    the candidate's position number) rather than matching by title text, since
     that's more reliable than hoping the model echoes titles back verbatim.
     """
     client = Anthropic(api_key=api_key or os.environ["ANTHROPIC_API_KEY"])
@@ -116,26 +151,22 @@ def select_and_summarize(candidates: list[dict], desired_count: int = 5, api_key
 
     response = client.messages.create(
         model=MODEL,
-        max_tokens=2048,
+        max_tokens=3072,
         system=SELECT_SYSTEM_PROMPT.format(desired_count=desired_count),
         messages=[{"role": "user", "content": candidates_text}],
     )
 
-    text = response.content[0].text.strip()
-    if text.startswith("```"):
-        text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
-        text = text.strip()
-
-    selections = json.loads(text)
+    selections = _parse_json_response(response.content[0].text)
 
     results = []
     for sel in selections[:desired_count]:
         idx = sel["index"]
         if not (0 <= idx < len(candidates)):
             continue  # guard against an out-of-range index in the model's response
-        results.append({"story": candidates[idx], "script": sel["script"]})
+        parts = sel["parts"]
+        if len(parts) != 3:
+            continue  # guard against a malformed parts array
+        results.append({"story": candidates[idx], "parts": parts})
 
     return results
 
@@ -145,7 +176,10 @@ if __name__ == "__main__":
 
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 5
     stories = fetch_top_stories(n)
-    summaries = summarize_stories(stories)
+    parts_lists = summarize_stories(stories)
 
-    for s, line in zip(stories, summaries):
-        print(f"- {s['title']} ({s['source']})\n  -> {line}\n")
+    for s, parts in zip(stories, parts_lists):
+        print(f"- {s['title']} ({s['source']})")
+        for p in parts:
+            print(f"    {p}")
+        print()
