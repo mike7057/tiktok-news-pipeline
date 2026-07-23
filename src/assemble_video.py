@@ -225,6 +225,10 @@ def assemble_video(
         audio_codec="aac",
         threads=4,
         preset="medium",
+        # Without this, moviepy drops its TEMP_MPY_wvf_snd audio file next to
+        # the process's cwd instead of next to output_path - put it in
+        # tmp_dir so it's swept up by the caller's tmp_dir cleanup regardless.
+        temp_audiofile_path=tmp_dir,
     )
 
     return output_path

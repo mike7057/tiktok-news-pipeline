@@ -33,7 +33,7 @@ jobs:
         working-directory: src
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: python main.py --count 5 --output-dir ../output --tmp-dir ../tmp
+        run: python main.py --count 5 --topic gaming --output-dir ../output --tmp-dir ../tmp
 
       - name: Upload video + script as an artifact
         uses: actions/upload-artifact@v4
