@@ -20,15 +20,16 @@ import os
 import shutil
 import sys
 
-from assemble_video import assemble_video
+from assemble_video import assemble_individual_videos, assemble_video, group_parts_for_slides
 from fetch_news import (
     MULTI_FEED_TOPICS,
     build_search_feed_url,
     fetch_from_multiple_feeds,
     fetch_top_stories,
 )
+from fetch_image import fetch_story_image
 from generate_audio import generate_audio
-from summarize import select_and_summarize, summarize_stories
+from summarize import generate_captions, select_and_summarize, summarize_stories
 
 # Topics with a dedicated Google News section - broad categories only
 TOPIC_FEEDS = {
@@ -65,14 +66,22 @@ def resolve_feed_url(topic: str | None, query: str | None) -> str | None:
     return None
 
 
-def run(count: int, topic: str | None, query: str | None, output_dir: str, tmp_dir: str):
+def run(
+    count: int,
+    topic: str | None,
+    query: str | None,
+    output_dir: str,
+    tmp_dir: str,
+    video_format: str = "individual",
+    slides_per_story: int = 1,
+):
     today = datetime.date.today().isoformat()
     label = query or topic or "general"
     use_significance_ranking = bool(topic and topic in MULTI_FEED_TOPICS and not query)
 
     if use_significance_ranking:
         pool_size = max(count * 4, 20)
-        print(f"[1/4] Fetching a pool of {pool_size} candidate stories ({label})...")
+        print(f"[1/6] Fetching a pool of {pool_size} candidate stories ({label})...")
         candidates = fetch_from_multiple_feeds(MULTI_FEED_TOPICS[topic], pool_size=pool_size)
 
         if not candidates:
@@ -82,7 +91,7 @@ def run(count: int, topic: str | None, query: str | None, output_dir: str, tmp_d
         for i, c in enumerate(candidates, 1):
             print(f"    {i}. [{c['coverage_count']}x] {c['title']} ({c['source']})")
 
-        print(f"[2/4] Selecting the top {count} most significant + summarizing with Claude...")
+        print(f"[2/6] Selecting the top {count} most significant + summarizing with Claude...")
         selections = select_and_summarize(candidates, desired_count=count)
 
         if not selections:
@@ -97,7 +106,7 @@ def run(count: int, topic: str | None, query: str | None, output_dir: str, tmp_d
             print(f"    {i}. {s['title']} ({s['source']})")
 
     else:
-        print(f"[1/4] Fetching top {count} stories ({label})...")
+        print(f"[1/6] Fetching top {count} stories ({label})...")
         feed_url = resolve_feed_url(topic, query)
         stories = fetch_top_stories(count, feed_url) if feed_url else fetch_top_stories(count)
 
@@ -108,53 +117,128 @@ def run(count: int, topic: str | None, query: str | None, output_dir: str, tmp_d
         for i, s in enumerate(stories, 1):
             print(f"    {i}. {s['title']} ({s['source']})")
 
-        print("[2/4] Summarizing with Claude...")
+        print("[2/6] Summarizing with Claude...")
         parts_lists = summarize_stories(stories)
 
-    print("[3/4] Generating narration audio...")
+    print("[3/6] Generating captions + hashtags...")
+    captions = generate_captions(stories, parts_lists)
+
+    print("[4/6] Fetching real story images...")
+    os.makedirs(tmp_dir, exist_ok=True)
+    image_paths = []
+    for i, s in enumerate(stories):
+        media_url = s.get("media_url")
+        article_url = s.get("link", "")
+        tmp_img_path = os.path.join(tmp_dir, f"visual_{i}.jpg")
+        result = fetch_story_image(media_url, article_url, tmp_img_path)
+        if result:
+            # Copy to the output directory too (not just tmp_dir, which gets
+            # deleted at the end of this function) so each story's image is
+            # easy to review on its own before posting, without scrubbing
+            # through the assembled video.
+            persistent_path = os.path.join(
+                output_dir, f"top{count}_{today}_story{i + 1:02d}_image.jpg"
+            )
+            os.makedirs(output_dir, exist_ok=True)
+            shutil.copy(result, persistent_path)
+            image_paths.append(result)
+            print(f"    Story {i + 1}: found ({persistent_path})")
+        else:
+            image_paths.append(None)
+            print(f"    Story {i + 1}: no image found, skipping")
+
+    print("[5/6] Generating narration audio...")
     os.makedirs(tmp_dir, exist_ok=True)
     audio_paths_lists = []
-    total_parts = sum(len(p) for p in parts_lists)
+    total_groups = sum(len(group_parts_for_slides(p, slides_per_story)) for p in parts_lists)
     rendered = 0
     for i, parts in enumerate(parts_lists):
+        groups = group_parts_for_slides(parts, slides_per_story)
         story_audio_paths = []
-        for j, part_text in enumerate(parts):
+        for j, group in enumerate(groups):
+            combined_text = " ".join(parts[k] for k in group)
             audio_path = os.path.join(tmp_dir, f"narration_{i}_{j}.mp3")
-            generate_audio(part_text, audio_path)
+            generate_audio(combined_text, audio_path)
             story_audio_paths.append(audio_path)
             rendered += 1
-            print(f"    Rendered audio {rendered}/{total_parts}")
+            print(f"    Rendered audio {rendered}/{total_groups}")
         audio_paths_lists.append(story_audio_paths)
 
-    print("[4/4] Assembling video...")
+    print(f"[6/6] Assembling video ({video_format})...")
     os.makedirs(output_dir, exist_ok=True)
-    video_path = os.path.join(output_dir, f"top{count}_{today}.mp4")
-    assemble_video(
-        stories,
-        parts_lists,
-        audio_paths_lists,
-        output_path=video_path,
-        tmp_dir=tmp_dir,
-        video_title=f"Top {count} News Today",
-        video_subtitle=datetime.date.today().strftime("%B %d, %Y"),
-    )
 
-    # Save the script + sources alongside the video so you can sanity-check
-    # or add a caption before posting
+    if video_format == "individual":
+        video_paths = assemble_individual_videos(
+            stories,
+            parts_lists,
+            audio_paths_lists,
+            output_dir=output_dir,
+            tmp_dir=tmp_dir,
+            filename_prefix=f"top{count}_{today}",
+            slides_per_story=slides_per_story,
+            image_paths=image_paths,
+        )
+    else:
+        combined_path = os.path.join(output_dir, f"top{count}_{today}.mp4")
+        assemble_video(
+            stories,
+            parts_lists,
+            audio_paths_lists,
+            output_path=combined_path,
+            tmp_dir=tmp_dir,
+            video_title=f"Top {count} News Today",
+            video_subtitle=datetime.date.today().strftime("%B %d, %Y"),
+            image_paths=image_paths,
+        )
+        video_paths = [combined_path]
+
+    # Save the script + sources alongside the video(s) so you can sanity-check
+    # or write a caption before posting. In individual mode, each story is
+    # paired with the specific file it lives in, since you'll be uploading
+    # each one separately with its own caption.
     script_path = os.path.join(output_dir, f"top{count}_{today}_script.txt")
-    with open(script_path, "w") as f:
+    with open(script_path, "w", encoding="utf-8") as f:
         for i, (s, parts) in enumerate(zip(stories, parts_lists), 1):
-            f.write(f"{i}. {s['title']}\n   Source: {s['source']}\n   Link: {s['link']}\n")
+            f.write(f"{i}. {s['title']}\n")
+            if video_format == "individual":
+                f.write(f"   Video: {os.path.basename(video_paths[i - 1])}\n")
+            f.write(f"   Source(s): {s.get('source', '')}\n")
+            for link in s.get("links") or [s.get("link", "")]:
+                if link:
+                    f.write(f"   Link: {link}\n")
             f.write(f"   Hook: {parts[0]}\n")
             f.write(f"   Detail 1: {parts[1]}\n")
             f.write(f"   Detail 2: {parts[2]}\n\n")
 
-    print(f"\nDone.\n  Video:  {video_path}\n  Script: {script_path}")
+    # Save captions/hashtags separately, one entry per story, so you can copy
+    # straight from this file into TikTok's caption field when uploading -
+    # "Ready to paste" is caption + hashtags combined exactly as TikTok
+    # expects them typed into a single field.
+    captions_path = os.path.join(output_dir, f"top{count}_{today}_captions.txt")
+    with open(captions_path, "w", encoding="utf-8") as f:
+        for i, (s, cap) in enumerate(zip(stories, captions), 1):
+            caption_text = cap.get("caption", "")
+            hashtags = cap.get("hashtags", [])
+            hashtag_line = " ".join(f"#{tag}" for tag in hashtags)
+
+            f.write(f"{i}. {s['title']}\n")
+            if video_format == "individual":
+                f.write(f"   Video: {os.path.basename(video_paths[i - 1])}\n")
+            f.write(f"   Caption: {caption_text}\n")
+            f.write(f"   Hashtags: {hashtag_line}\n")
+            ready_to_paste = f"{caption_text} {hashtag_line}".strip()
+            f.write(f"   Ready to paste: {ready_to_paste}\n\n")
+
+    print(
+        f"\nDone.\n  Video(s):  {', '.join(video_paths)}\n"
+        f"  Script:    {script_path}\n"
+        f"  Captions:  {captions_path}"
+    )
 
     # Clean up intermediate audio/background files
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    return video_path, script_path
+    return video_paths, script_path, captions_path
 
 
 if __name__ == "__main__":
@@ -172,8 +256,23 @@ if __name__ == "__main__":
         help='Custom Google News search query, e.g. --query \'Nintendo OR PlayStation\'. '
         "Overrides --topic if both are given.",
     )
+    parser.add_argument(
+        "--format",
+        choices=["individual", "combined"],
+        default="individual",
+        help="'individual' (default): one standalone video per story, for posting each as its "
+        "own TikTok upload. 'combined': one video covering all stories back to back.",
+    )
     parser.add_argument("--output-dir", default="../output", help="Where to save final files")
     parser.add_argument("--tmp-dir", default="../tmp", help="Scratch space for intermediate files")
+    parser.add_argument(
+        "--slides",
+        type=int,
+        default=1,
+        help="Screens per story (default 1): a single slide with the full script "
+        "narrated over one still headline+hook screen. Use 3 for the original "
+        "one-part-per-screen format. 2 is a middle ground.",
+    )
     args = parser.parse_args()
 
-    run(args.count, args.topic, args.query, args.output_dir, args.tmp_dir)
+    run(args.count, args.topic, args.query, args.output_dir, args.tmp_dir, args.format, args.slides)

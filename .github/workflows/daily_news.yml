@@ -33,6 +33,7 @@ jobs:
         working-directory: src
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python main.py --count 5 --topic gaming --output-dir ../output --tmp-dir ../tmp
 
       - name: Upload video + script as an artifact
