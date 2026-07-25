@@ -365,26 +365,43 @@ def _build_two_image_layers(
     cache_key: str,
 ):
     """
-    Builds up to 2 positioned image-panel clips for this tile's zone layout.
-    Either path can be None (that image wasn't available) - a missing image1
-    with a present image2 still places image2 in its own zone2 slot rather
-    than shifting it up to fill the gap, so pacing/layout stays predictable
-    across a video even when a particular story's image fetch partially
-    failed. Returns a list of 0-2 ImageClips.
+    Builds 0-2 positioned image-panel clips for this tile's zone layout.
+
+    Both paths present: each gets its own zone1/zone2 slot, as normal.
+
+    Only one path present: rather than leaving a dead gap where the missing
+    image would have been (or, worse, showing the same photo pasted into
+    both slots - confirmed to read as an obvious, lazy-looking repeat when
+    a story only has one genuine source image), that single image is given
+    the FULL combined region (zone1's top through zone2's bottom) so it
+    reads as one deliberately large image, not a half-filled layout.
+
+    Neither present: returns an empty list (background/blobs only).
     """
-    layers = []
-    for slot_name, path in (("image1", image_path_1), ("image2", image_path_2)):
-        if not path:
-            continue
-        top, bottom = zones[slot_name]
-        panel_h = int(round(bottom - top))
-        panel_img = _build_image_panel(path, accent, CONTENT_W, panel_h)
-        panel_path = os.path.join(tmp_dir, f"panel_{cache_key}_{slot_name}.png")
-        panel_img.save(panel_path)
-        layers.append(
-            ImageClip(panel_path).with_duration(duration).with_position((SAFE_LEFT, top))
-        )
-    return layers
+    if image_path_1 and image_path_2:
+        layers = []
+        for slot_name, path in (("image1", image_path_1), ("image2", image_path_2)):
+            top, bottom = zones[slot_name]
+            panel_h = int(round(bottom - top))
+            panel_img = _build_image_panel(path, accent, CONTENT_W, panel_h)
+            panel_path = os.path.join(tmp_dir, f"panel_{cache_key}_{slot_name}.png")
+            panel_img.save(panel_path)
+            layers.append(
+                ImageClip(panel_path).with_duration(duration).with_position((SAFE_LEFT, top))
+            )
+        return layers
+
+    single_path = image_path_1 or image_path_2
+    if not single_path:
+        return []
+
+    top = zones["image1"][0]
+    bottom = zones["image2"][1]
+    panel_h = int(round(bottom - top))
+    panel_img = _build_image_panel(single_path, accent, CONTENT_W, panel_h)
+    panel_path = os.path.join(tmp_dir, f"panel_{cache_key}_single.png")
+    panel_img.save(panel_path)
+    return [ImageClip(panel_path).with_duration(duration).with_position((SAFE_LEFT, top))]
 
 
 def _story_badge(text: str, duration: float, accent: tuple[int, int, int]):
@@ -480,16 +497,18 @@ def _build_title_tile(
     headline_clip = headline_clip.with_position((SAFE_LEFT, y_start))
     hook_clip = hook_clip.with_position((SAFE_LEFT, y_start + headline_h + gap))
 
-    badge = _story_badge(f"{story_number}/{total_stories}", duration, accent)
-
     layers = [background, *blobs]
     layers.extend(
         _build_two_image_layers(
             image_path, image_path_2, zones, accent, duration, tmp_dir, f"{story_number}_title"
         )
     )
-    layers.extend([headline_clip, hook_clip, badge])
+    layers.extend([headline_clip, hook_clip])
+    # Badge + dots are a progress indicator through THIS story's own pages -
+    # meaningless (and confusing, implying more parts exist) on a single-page
+    # post, so both only render when there's actually more than one page.
     if total_tiles > 1:
+        layers.append(_story_badge(f"{story_number}/{total_stories}", duration, accent))
         layers.append(_progress_dots(0, total_tiles, duration, accent))
 
     segment = CompositeVideoClip(layers, size=(W, H)).with_duration(duration)
@@ -539,16 +558,18 @@ def _build_detail_tile(
     y_start = int(round(zones["text"][0]))
     body_clip = body_clip.with_position((SAFE_LEFT, y_start))
 
-    badge = _story_badge(f"{story_number}/{total_stories}", duration, accent)
-
     layers = [background, *blobs]
     layers.extend(
         _build_two_image_layers(
             image_path, image_path_2, zones, accent, duration, tmp_dir, f"{story_number}_{tile_index}"
         )
     )
-    layers.extend([body_clip, badge])
+    layers.append(body_clip)
+    # Badge + dots are a progress indicator through THIS story's own pages -
+    # meaningless (and confusing, implying more parts exist) on a single-page
+    # post, so both only render when there's actually more than one page.
     if total_tiles > 1:
+        layers.append(_story_badge(f"{story_number}/{total_stories}", duration, accent))
         layers.append(_progress_dots(tile_index, total_tiles, duration, accent))
 
     segment = CompositeVideoClip(layers, size=(W, H)).with_duration(duration)

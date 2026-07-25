@@ -9,13 +9,15 @@ Finds and downloads up to 2 real, story-specific images for a news item:
      heuristic, not a guarantee: unlike og:image (a single well-defined,
      universally-supported tag), there's no equivalently reliable convention
      for "the second most relevant image" - site HTML structures vary
-     widely. If no distinct second image is found, the primary image is
-     reused for both slots rather than leaving one blank. A candidate
-     second image is also checked against the primary with a perceptual
-     hash (images_are_near_duplicates) and discarded if it's really just a
-     different-sized rendition of the same photo - confirmed to happen in
-     practice (a site's og:image and an in-article <img> pointing at the
-     same screenshot under two different URLs).
+     widely. If no distinct second image is found, only the primary is
+     returned (the second slot is None) rather than pasting the same photo
+     into both slots - showing one image once reads as deliberate; showing
+     it twice reads as an obvious, lazy-looking repeat. A candidate second
+     image is also checked against the primary with a perceptual hash
+     (images_are_near_duplicates) and discarded on the same basis if it's
+     really just a different-sized rendition of the same photo - confirmed
+     to happen in practice (a site's og:image and an in-article <img>
+     pointing at the same screenshot under two different URLs).
 
 Every image sourced this way should get a quick human glance before a video
 posts (confirm it's genuinely the right image for the story) - this is even
@@ -197,11 +199,11 @@ def fetch_story_images(
     """
     Fetches up to 2 images for a story: the primary (media_url or og:image),
     and a second, distinct image found by re-parsing the article page's own
-    content images. If no distinct second image is found but the primary
-    succeeded, the primary is reused for both slots (returned as
-    (path1, path1)) rather than leaving the second slot empty, so every
-    story gets 2 images to display even when only one genuine source image
-    exists. Returns (path_1_or_None, path_2_or_None) - both None only if the
+    content images. If no distinct second image is found, the second slot
+    is returned as None (NOT the primary reused) - the caller/renderer is
+    expected to show a single available image at full size rather than the
+    same photo pasted into both slots, which reads as an obvious repeat.
+    Returns (path_1_or_None, path_2_or_None) - both None only if the
     primary image itself couldn't be found/downloaded at all.
     """
     primary_url = find_image_url(media_url, article_url)
@@ -226,7 +228,7 @@ def fetch_story_images(
             if images_are_near_duplicates(primary_path, second_path):
                 print(
                     f"    (second image at {second_url} looks like a duplicate of the "
-                    "primary - reusing primary instead)",
+                    "primary - dropping it, showing just the primary)",
                     file=sys.stderr,
                 )
             else:
@@ -234,9 +236,10 @@ def fetch_story_images(
 
     # No distinct second image found (either nothing else was found, it
     # failed to download, or it turned out to be a duplicate of the
-    # primary) - reuse the primary for both slots rather than leaving
-    # image2 blank.
-    return primary_path, primary_path
+    # primary) - return just the primary. The renderer shows a single
+    # available image at full size rather than pasting the same photo into
+    # both slots.
+    return primary_path, None
 
 
 if __name__ == "__main__":

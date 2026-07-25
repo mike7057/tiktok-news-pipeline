@@ -142,16 +142,14 @@ def run(
         if path1:
             persistent_1 = os.path.join(output_dir, f"top{count}_{today}_story{i + 1:02d}_image1.jpg")
             shutil.copy(path1, persistent_1)
-        if path2 and path2 != path1:
+        if path2:
             persistent_2 = os.path.join(output_dir, f"top{count}_{today}_story{i + 1:02d}_image2.jpg")
             shutil.copy(path2, persistent_2)
 
-        if path1 and path2 and path1 == path2:
-            print(f"    Story {i + 1}: found 1 image (reused for both slots - no distinct second image found)")
-        elif path1 and path2:
+        if path1 and path2:
             print(f"    Story {i + 1}: found 2 distinct images")
         elif path1:
-            print(f"    Story {i + 1}: found 1 image")
+            print(f"    Story {i + 1}: found 1 image (shown at full size - no distinct second image found)")
         else:
             print(f"    Story {i + 1}: no image found, skipping")
 
