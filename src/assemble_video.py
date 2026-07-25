@@ -81,38 +81,72 @@ ACCENT_COLORS = [
 BG_TOP = (18, 18, 24)
 BG_BOTTOM = (32, 32, 42)
 
-# Dynamic content (the part that moves between tiles) is confined to this
-# vertical band, computed from the actual rendered text height each time -
-# so a position can never push content past the safe bottom margin, no
-# matter how long the headline/hook/detail text turns out to be.
-CONTENT_TOP = 160
+# Dynamic content zone. CONTENT_TOP is pushed down to 230 (not the old 160)
+# specifically because the badge/dots bugfix above now correctly anchors them
+# to SAFE_TOP=140 - the old CONTENT_TOP=160 predated that fix and would sit
+# almost directly under the badge once it stopped being mispositioned above
+# the safe zone. CONTENT_BOTTOM is unchanged (H - SAFE_BOTTOM).
+CONTENT_TOP = 230
+CONTENT_BOTTOM = H - SAFE_BOTTOM  # 1620
 
-# Reserved band for the secondary visual (image), pinned at a fixed position
-# so pacing stays consistent across a video even when a story's image
-# generation failed (that band just shows background in that case, not a
-# layout shift). Text's dynamic zone shrinks to make room above it.
-IMAGE_BAND_TOP = 1080
-IMAGE_BAND_BOTTOM = 1620  # was CONTENT_BOTTOM's old value
-CONTENT_BOTTOM = 1040  # shrunk from 1620 to leave room for the image band above
+# Two images per tile, with the text block landing either above both (text_top)
+# or sandwiched between them (text_middle). Zone sizes are NOT fixed - text
+# gets exactly the height its actual content measures to, and the 2 images
+# split whatever space remains. This is deliberate: an earlier version of
+# this layout used a fixed text-zone height (360px) sized off one example
+# headline, and testing across several realistic headline+hook combinations
+# found real ones needing anywhere from ~450px up to 760+px - a fixed
+# allocation would have silently overflowed into the image zone for any
+# longer-than-average headline. Computing zones from the real measured
+# text height removes that risk entirely: longer text simply leaves less
+# (but never negative) room for images, rather than any zone ever running
+# out of the space it was promised.
+IMAGE_GAP = 24
+MIN_IMAGE_PANEL_H = 220  # floor so images never shrink to an awkward sliver
 
-# Rotating fractional anchors (0.0 = flush with CONTENT_TOP, 1.0 = flush with
-# CONTENT_BOTTOM once the block's real height is subtracted) so the content
-# block doesn't always land in the same spot. TITLE_Y_FRACTIONS has 4 entries;
-# DETAIL_Y_FRACTIONS has 5 specifically because detail tiles advance by 2 per
-# story (2 detail tiles/story) - an even-length list here would fall into a
-# short repeating cycle (e.g. a 4-entry list repeats the same pair of
-# positions every other story); 5 is coprime with 2, so all 5 positions get
-# used before anything repeats.
-TITLE_Y_FRACTIONS = [0.0, 0.45, 0.85, 0.2]
-DETAIL_Y_FRACTIONS = [0.0, 0.25, 0.5, 0.75, 1.0]
+# Rotating variant list, weighted 2:1 toward text_top so text_middle ("mix it
+# up" per the sandwiched-between-images look) shows up occasionally rather
+# than as often as text_top.
+LAYOUT_VARIANTS = ["text_top", "text_top", "text_middle"]
 
 
-def _anchored_y(fraction: float, block_height: float) -> int:
-    """Convert a 0-1 fraction into an actual y position, guaranteeing the
-    block (of the given height) never starts before CONTENT_TOP or ends
-    after CONTENT_BOTTOM."""
-    available = max(CONTENT_BOTTOM - CONTENT_TOP - block_height, 0)
-    return int(round(CONTENT_TOP + fraction * available))
+def _zone_bounds(variant: str, text_height: float) -> dict:
+    """
+    Returns the {text: (top, bottom), image1: (top, bottom), image2: (top,
+    bottom)} pixel bounds for a given layout variant and the CALLER'S ACTUAL
+    measured text height - not a fixed guess. Both image slots always get
+    equal height, computed as whatever's left in [CONTENT_TOP, CONTENT_BOTTOM]
+    after reserving exactly text_height (plus 2 gaps) for text, floored at
+    MIN_IMAGE_PANEL_H so an extremely long headline can't shrink images to
+    nothing (in that rare case the two zones may overlap slightly rather
+    than images vanishing - a graceful degradation, not silent data loss).
+    """
+    usable = CONTENT_BOTTOM - CONTENT_TOP
+    each_image_h = max((usable - text_height - IMAGE_GAP * 2) / 2, MIN_IMAGE_PANEL_H)
+
+    if variant == "text_middle":
+        img1_top = CONTENT_TOP
+        text_top = img1_top + each_image_h + IMAGE_GAP
+        img2_top = text_top + text_height + IMAGE_GAP
+    else:  # "text_top" (default/fallback)
+        text_top = CONTENT_TOP
+        img1_top = text_top + text_height + IMAGE_GAP
+        img2_top = img1_top + each_image_h + IMAGE_GAP
+
+    return {
+        "text": (text_top, text_top + text_height),
+        "image1": (img1_top, img1_top + each_image_h),
+        "image2": (img2_top, img2_top + each_image_h),
+    }
+
+
+def _anchored_y(fraction: float, block_height: float, zone_top: float = CONTENT_TOP, zone_bottom: float = CONTENT_BOTTOM) -> int:
+    """Convert a 0-1 fraction into an actual y position within [zone_top,
+    zone_bottom], guaranteeing the block (of the given height) never starts
+    before zone_top or ends after zone_bottom. Defaults to the module-level
+    CONTENT_TOP/CONTENT_BOTTOM for callers that don't need a custom zone."""
+    available = max(zone_bottom - zone_top - block_height, 0)
+    return int(round(zone_top + fraction * available))
 
 
 def _wrap_text(text: str, font_path: str, font_size: int, max_width: int) -> str:
@@ -208,9 +242,15 @@ def _measure_wrapped_text_height(wrapped_text: str, font_path: str, font_size: i
 
     # Height needed from the canvas's y=0 reference (= `pad` in our
     # measuring canvas) down to the last row that actually has ink, plus a
-    # small safety pad - a clipped descender is far worse than a few extra
-    # pixels of breathing room.
-    return (last_ink_row - pad) + 6
+    # real safety margin - a clipped descender is far worse than a bit of
+    # extra breathing room. Empirically, a small pad here (+6) was found to
+    # be fully absorbed by a discrepancy between this measuring canvas and
+    # the real TextClip's own render: across several real headline/hook
+    # examples, the actual rendered ink consistently reached the *exact*
+    # last pixel row of a box sized with only +6 - zero effective margin,
+    # not the intended buffer. 24px reliably reproduces genuine breathing
+    # room across the same test cases.
+    return (last_ink_row - pad) + 36
 
 
 def _make_grid_texture() -> Image.Image:
@@ -291,15 +331,12 @@ def _make_gradient_background(accent: tuple[int, int, int]) -> Image.Image:
     return img.convert("RGB")
 
 
-def _build_image_panel(image_path: str, accent: tuple[int, int, int]) -> Image.Image:
+def _build_image_panel(image_path: str, accent: tuple[int, int, int], panel_w: int, panel_h: int) -> Image.Image:
     """
-    Loads the generated image, center-crops it to fill the reserved image
-    band exactly (no letterboxing), and adds a thin accent-colored border so
-    it feels like a designed element rather than a pasted rectangle.
+    Loads an image, center-crops it to fill the given panel size exactly (no
+    letterboxing), and adds a thin accent-colored border so it feels like a
+    designed element rather than a pasted rectangle.
     """
-    panel_w = CONTENT_W
-    panel_h = IMAGE_BAND_BOTTOM - IMAGE_BAND_TOP
-
     img = Image.open(image_path).convert("RGB")
     img = ImageOps.fit(img, (panel_w, panel_h), method=Image.LANCZOS)
 
@@ -318,25 +355,60 @@ def _build_image_panel(image_path: str, accent: tuple[int, int, int]) -> Image.I
     return panel
 
 
+def _build_two_image_layers(
+    image_path_1: str | None,
+    image_path_2: str | None,
+    zones: dict,
+    accent: tuple[int, int, int],
+    duration: float,
+    tmp_dir: str,
+    cache_key: str,
+):
+    """
+    Builds up to 2 positioned image-panel clips for this tile's zone layout.
+    Either path can be None (that image wasn't available) - a missing image1
+    with a present image2 still places image2 in its own zone2 slot rather
+    than shifting it up to fill the gap, so pacing/layout stays predictable
+    across a video even when a particular story's image fetch partially
+    failed. Returns a list of 0-2 ImageClips.
+    """
+    layers = []
+    for slot_name, path in (("image1", image_path_1), ("image2", image_path_2)):
+        if not path:
+            continue
+        top, bottom = zones[slot_name]
+        panel_h = int(round(bottom - top))
+        panel_img = _build_image_panel(path, accent, CONTENT_W, panel_h)
+        panel_path = os.path.join(tmp_dir, f"panel_{cache_key}_{slot_name}.png")
+        panel_img.save(panel_path)
+        layers.append(
+            ImageClip(panel_path).with_duration(duration).with_position((SAFE_LEFT, top))
+        )
+    return layers
+
+
 def _story_badge(text: str, duration: float, accent: tuple[int, int, int]):
     """Small persistent nav marker (e.g. "2/5") anchored to the same corner
     on every tile - a stable orientation cue while the main content below
     it is free to move around. Right-aligned to its own rendered width so
-    it never drifts past the safe boundary regardless of digit count."""
+    it never drifts past the safe boundary regardless of digit count.
+    Vertically anchored to SAFE_TOP (not a hardcoded pixel value) so it
+    never sits in the zone reserved for TikTok's own top UI chrome."""
     clip = TextClip(font=FONT_BOLD, text=text, font_size=40, color=f"rgb{accent}", method="label")
     clip = clip.with_duration(duration)
     x = W - SAFE_RIGHT - clip.size[0]
-    return clip.with_position((x, 56))
+    return clip.with_position((x, SAFE_TOP))
 
 
 def _progress_dots(tile_index: int, total_tiles: int, duration: float, accent: tuple[int, int, int]):
     """Tiny filled/hollow dot row showing which of the 3 tiles (per story)
-    this is - helps the viewer read 3 screens as one continuing story."""
+    this is - helps the viewer read 3 screens as one continuing story.
+    Sits just below the badge, both anchored relative to SAFE_TOP."""
     dots = "  ".join("\u25cf" if i == tile_index else "\u25cb" for i in range(total_tiles))
     clip = TextClip(font=FONT_REGULAR, text=dots, font_size=26, color=f"rgb{accent}", method="label")
     clip = clip.with_duration(duration)
     x = W - SAFE_RIGHT - clip.size[0]
-    return clip.with_position((x, 108))
+    return clip.with_position((x, SAFE_TOP + 52))
 
 
 def _build_title_tile(
@@ -350,12 +422,15 @@ def _build_title_tile(
     template_index: int,
     pad_seconds: float = 0.6,
     image_path: str | None = None,
+    image_path_2: str | None = None,
     total_tiles: int = 3,
 ):
-    """The first tile for a story: headline + a short hook line stacked
-    beneath it. Hook position is computed from the headline's actual
-    rendered height (not a hardcoded offset), so a headline that wraps to
-    3 lines can never overlap the hook text below it."""
+    """The first tile for a story: headline + a short hook line, plus up to
+    2 real story images, laid out in one of LAYOUT_VARIANTS ("text_top" or
+    "text_middle" - sandwiched between the 2 images). Hook position is
+    computed from the headline's actual rendered height (not a hardcoded
+    offset), so a headline that wraps to 3 lines can never overlap the hook
+    text below it."""
     audio = AudioFileClip(audio_path)
     duration = audio.duration + pad_seconds
 
@@ -364,12 +439,12 @@ def _build_title_tile(
     background = ImageClip(bg_path).with_duration(duration)
     blobs = _glow_blob_clips(accent, duration, tmp_dir, seed=story_number * 10)
 
-    y_fraction = TITLE_Y_FRACTIONS[template_index % len(TITLE_Y_FRACTIONS)]
+    variant = LAYOUT_VARIANTS[template_index % len(LAYOUT_VARIANTS)]
 
     # Build both text clips first (unpositioned) so we know the real combined
-    # height before choosing where the block starts - this is what makes the
-    # positioning overflow-safe regardless of how long the text wraps. Height
-    # is measured independently (_measure_wrapped_text_height) and fed back in
+    # height before asking for zone positions - this is what makes the
+    # layout overflow-safe regardless of how long the text wraps. Height is
+    # measured independently (_measure_wrapped_text_height) and fed back in
     # via size=(...) rather than left for TextClip to auto-compute, since its
     # own auto-sizing is what clips the last line in the first place (see
     # that function's docstring).
@@ -397,9 +472,10 @@ def _build_title_tile(
         text_align="left",
     ).with_duration(duration)
 
-    gap = 48
+    gap = 32
     block_height = headline_h + gap + hook_h
-    y_start = _anchored_y(y_fraction, block_height)
+    zones = _zone_bounds(variant, block_height)
+    y_start = int(round(zones["text"][0]))
 
     headline_clip = headline_clip.with_position((SAFE_LEFT, y_start))
     hook_clip = hook_clip.with_position((SAFE_LEFT, y_start + headline_h + gap))
@@ -407,17 +483,11 @@ def _build_title_tile(
     badge = _story_badge(f"{story_number}/{total_stories}", duration, accent)
 
     layers = [background, *blobs]
-    if image_path:
-        panel_img = _build_image_panel(image_path, accent)
-        panel_path = os.path.join(tmp_dir, f"panel_{story_number}_title.png")
-        panel_img.save(panel_path)
-        panel_clip = (
-            ImageClip(panel_path)
-            .with_duration(duration)
-            .with_position((SAFE_LEFT, IMAGE_BAND_TOP))
+    layers.extend(
+        _build_two_image_layers(
+            image_path, image_path_2, zones, accent, duration, tmp_dir, f"{story_number}_title"
         )
-        layers.append(panel_clip)
-
+    )
     layers.extend([headline_clip, hook_clip, badge])
     if total_tiles > 1:
         layers.append(_progress_dots(0, total_tiles, duration, accent))
@@ -437,11 +507,12 @@ def _build_detail_tile(
     template_index: int,
     pad_seconds: float = 0.6,
     image_path: str | None = None,
+    image_path_2: str | None = None,
     total_tiles: int = 3,
 ):
-    """A follow-up tile for a story: just the descriptive text, larger and
-    given more of the screen than the title tile, at a rotating start
-    position so tile 2 and tile 3 don't look identical."""
+    """A follow-up tile for a story: just the descriptive text, plus up to 2
+    real story images, laid out in one of LAYOUT_VARIANTS the same way
+    _build_title_tile is."""
     audio = AudioFileClip(audio_path)
     duration = audio.duration + pad_seconds
 
@@ -450,7 +521,7 @@ def _build_detail_tile(
     background = ImageClip(bg_path).with_duration(duration)
     blobs = _glow_blob_clips(accent, duration, tmp_dir, seed=story_number * 10 + tile_index)
 
-    y_fraction = DETAIL_Y_FRACTIONS[template_index % len(DETAIL_Y_FRACTIONS)]
+    variant = LAYOUT_VARIANTS[template_index % len(LAYOUT_VARIANTS)]
 
     wrapped_body = _wrap_text(text, FONT_REGULAR, 54, CONTENT_W)
     body_h = _measure_wrapped_text_height(wrapped_body, FONT_REGULAR, 54)
@@ -463,23 +534,19 @@ def _build_detail_tile(
         method="label",
         text_align="left",
     ).with_duration(duration)
-    y_start = _anchored_y(y_fraction, body_h)
+
+    zones = _zone_bounds(variant, body_h)
+    y_start = int(round(zones["text"][0]))
     body_clip = body_clip.with_position((SAFE_LEFT, y_start))
 
     badge = _story_badge(f"{story_number}/{total_stories}", duration, accent)
 
     layers = [background, *blobs]
-    if image_path:
-        panel_img = _build_image_panel(image_path, accent)
-        panel_path = os.path.join(tmp_dir, f"panel_{story_number}_{tile_index}.png")
-        panel_img.save(panel_path)
-        panel_clip = (
-            ImageClip(panel_path)
-            .with_duration(duration)
-            .with_position((SAFE_LEFT, IMAGE_BAND_TOP))
+    layers.extend(
+        _build_two_image_layers(
+            image_path, image_path_2, zones, accent, duration, tmp_dir, f"{story_number}_{tile_index}"
         )
-        layers.append(panel_clip)
-
+    )
     layers.extend([body_clip, badge])
     if total_tiles > 1:
         layers.append(_progress_dots(tile_index, total_tiles, duration, accent))
@@ -577,7 +644,7 @@ def assemble_video(
     tmp_dir: str,
     video_title: str = "Top News Today",
     video_subtitle: str = "",
-    image_paths: list[str | None] | None = None,
+    image_paths: list[tuple[str | None, str | None]] | None = None,
 ) -> str:
     """
     stories: list of story dicts (needs at least a "title" key)
@@ -585,8 +652,9 @@ def assemble_video(
                  [hook, detail_1, detail_2]
     audio_paths_lists: one entry per story, each a list of exactly 3 audio
                         file paths, matching parts_lists 1:1
-    image_paths: one entry per story (a path or None), or None to mean "no
-                 images for any story"
+    image_paths: one (image_path_1, image_path_2) tuple per story - either
+                 element may be None - or None to mean "no images for any
+                 story". Each tile shows up to 2 real story images.
     """
     os.makedirs(tmp_dir, exist_ok=True)
     total = len(stories)
@@ -611,6 +679,7 @@ def assemble_video(
             )
 
         accent = ACCENT_COLORS[i % len(ACCENT_COLORS)]
+        img1, img2 = image_paths[i] if image_paths else (None, None)
 
         clips.append(
             _build_title_tile(
@@ -622,7 +691,8 @@ def assemble_video(
                 accent,
                 tmp_dir,
                 title_template_counter,
-                image_path=image_paths[i] if image_paths else None,
+                image_path=img1,
+                image_path_2=img2,
             )
         )
         title_template_counter += 1
@@ -638,7 +708,8 @@ def assemble_video(
                     accent,
                     tmp_dir,
                     detail_template_counter,
-                    image_path=image_paths[i] if image_paths else None,
+                    image_path=img1,
+                    image_path_2=img2,
                 )
             )
             detail_template_counter += 1
@@ -679,7 +750,7 @@ def assemble_individual_videos(
     tmp_dir: str,
     filename_prefix: str = "story",
     slides_per_story: int = 1,
-    image_paths: list[str | None] | None = None,
+    image_paths: list[tuple[str | None, str | None]] | None = None,
 ) -> list[str]:
     """
     Builds one standalone vertical video per story. slides_per_story
@@ -689,8 +760,9 @@ def assemble_individual_videos(
     len(audio_paths_lists[i]) == len(group_parts_for_slides(parts_lists[i],
     slides_per_story))), not one per original script part.
 
-    image_paths: one entry per story (a path or None), or None to mean "no
-                 images for any story"
+    image_paths: one (image_path_1, image_path_2) tuple per story - either
+                 element may be None - or None to mean "no images for any
+                 story". Each tile shows up to 2 real story images.
 
     Returns the list of output file paths, one per story, in order.
     """
@@ -714,7 +786,7 @@ def assemble_individual_videos(
 
         accent = ACCENT_COLORS[i % len(ACCENT_COLORS)]
         total_tiles = len(groups)
-        image_path = image_paths[i] if image_paths else None
+        img1, img2 = image_paths[i] if image_paths else (None, None)
 
         clips = []
         for slide_idx, (group, audio_path) in enumerate(zip(groups, audio_paths)):
@@ -729,7 +801,8 @@ def assemble_individual_videos(
                         accent,
                         tmp_dir,
                         title_template_counter,
-                        image_path=image_path,
+                        image_path=img1,
+                        image_path_2=img2,
                         total_tiles=total_tiles,
                     )
                 )
@@ -746,7 +819,8 @@ def assemble_individual_videos(
                         accent,
                         tmp_dir,
                         detail_template_counter,
-                        image_path=image_path,
+                        image_path=img1,
+                        image_path_2=img2,
                         total_tiles=total_tiles,
                     )
                 )

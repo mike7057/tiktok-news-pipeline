@@ -27,7 +27,7 @@ from fetch_news import (
     fetch_from_multiple_feeds,
     fetch_top_stories,
 )
-from fetch_image import fetch_story_image
+from fetch_image import fetch_story_images
 from generate_audio import generate_audio
 from summarize import generate_captions, select_and_summarize, summarize_stories
 
@@ -125,26 +125,34 @@ def run(
 
     print("[4/6] Fetching real story images...")
     os.makedirs(tmp_dir, exist_ok=True)
-    image_paths = []
+    image_paths = []  # list of (path1, path2) tuples, one per story
     for i, s in enumerate(stories):
         media_url = s.get("media_url")
         article_url = s.get("link", "")
-        tmp_img_path = os.path.join(tmp_dir, f"visual_{i}.jpg")
-        result = fetch_story_image(media_url, article_url, tmp_img_path)
-        if result:
-            # Copy to the output directory too (not just tmp_dir, which gets
-            # deleted at the end of this function) so each story's image is
-            # easy to review on its own before posting, without scrubbing
-            # through the assembled video.
-            persistent_path = os.path.join(
-                output_dir, f"top{count}_{today}_story{i + 1:02d}_image.jpg"
-            )
-            os.makedirs(output_dir, exist_ok=True)
-            shutil.copy(result, persistent_path)
-            image_paths.append(result)
-            print(f"    Story {i + 1}: found ({persistent_path})")
+        tmp_img_path_1 = os.path.join(tmp_dir, f"visual_{i}_1.jpg")
+        tmp_img_path_2 = os.path.join(tmp_dir, f"visual_{i}_2.jpg")
+        path1, path2 = fetch_story_images(media_url, article_url, tmp_img_path_1, tmp_img_path_2)
+        image_paths.append((path1, path2))
+
+        # Copy to the output directory too (not just tmp_dir, which gets
+        # deleted at the end of this function) so each story's images are
+        # easy to review on their own before posting, without scrubbing
+        # through the assembled video.
+        os.makedirs(output_dir, exist_ok=True)
+        if path1:
+            persistent_1 = os.path.join(output_dir, f"top{count}_{today}_story{i + 1:02d}_image1.jpg")
+            shutil.copy(path1, persistent_1)
+        if path2 and path2 != path1:
+            persistent_2 = os.path.join(output_dir, f"top{count}_{today}_story{i + 1:02d}_image2.jpg")
+            shutil.copy(path2, persistent_2)
+
+        if path1 and path2 and path1 == path2:
+            print(f"    Story {i + 1}: found 1 image (reused for both slots - no distinct second image found)")
+        elif path1 and path2:
+            print(f"    Story {i + 1}: found 2 distinct images")
+        elif path1:
+            print(f"    Story {i + 1}: found 1 image")
         else:
-            image_paths.append(None)
             print(f"    Story {i + 1}: no image found, skipping")
 
     print("[5/6] Generating narration audio...")
