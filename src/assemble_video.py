@@ -15,6 +15,7 @@ Backgrounds are generated on the fly with Pillow (simple gradient + accent
 bar) so the pipeline needs zero stock-footage/image API and stays free.
 """
 
+import hashlib
 import os
 import platform
 import random
@@ -87,10 +88,6 @@ ACCENT_COLORS = [
 ]
 BG_TOP = (18, 18, 24)
 BG_BOTTOM = (32, 32, 42)
-
-BORDER_COLOR = (49, 168, 124)  # #31a87c - used ONLY as a thin divider line
-# at the seam between two adjacent images (see _build_two_image_layers),
-# not as a border around each panel's own outer edges.
 
 # When a tile has no narration audio (generate_audio disabled - see
 # main.py's --audio flag), there's nothing to time its duration against -
@@ -427,8 +424,17 @@ def _glow_blob_clips(
 
 
 def _make_gradient_background(accent: tuple[int, int, int]) -> Image.Image:
-    """Vertical dark gradient + colored accent bar + a faint dot-grid
-    texture, all generated on the fly with Pillow - zero external assets."""
+    """Vertical dark gradient + a faint dot-grid texture, all generated on
+    the fly with Pillow - zero external assets.
+
+    `accent` is no longer used here - it used to also draw a fixed
+    full-height accent-colored bar down the left edge, but that bar was
+    only ever visible behind the translucent text backdrop (everywhere
+    else it sat under a fully opaque image panel), where it showed up as
+    an unintentional stray colored sliver on the left edge of the text
+    box. The accent-colored seam lines (see _seam_line_clips) replace it
+    as the actual per-story accent marker. Kept as a parameter purely for
+    call-site compatibility."""
     img = Image.new("RGB", (W, H))
     draw = ImageDraw.Draw(img)
 
@@ -438,8 +444,6 @@ def _make_gradient_background(accent: tuple[int, int, int]) -> Image.Image:
         g = int(BG_TOP[1] + (BG_BOTTOM[1] - BG_TOP[1]) * t)
         b = int(BG_TOP[2] + (BG_BOTTOM[2] - BG_TOP[2]) * t)
         draw.line([(0, y), (W, y)], fill=(r, g, b))
-
-    draw.rectangle([0, 0, 24, H], fill=accent)
 
     img = img.convert("RGBA")
     img.alpha_composite(_GRID_TEXTURE)
@@ -569,6 +573,7 @@ def _build_panning_image_clip(
     cache_key: str,
     headroom: float = 1.15,
     seed: int = 0,
+    avoid_direction: tuple[int, int] | None = None,
 ):
     """
     A panning image clip fit exactly to (panel_w, panel_h): crops an
@@ -584,6 +589,18 @@ def _build_panning_image_clip(
     (BORDER_COLOR) appears is a thin divider drawn separately at the seam
     between two adjacent images (see _build_two_image_layers), not around
     each panel's own outer edges.
+
+    Returns (clip, (dir_x, dir_y)) - dir_x/dir_y are the sign (+1/-1) of
+    this panel's initial pan velocity on each axis at t=0. Both axes always
+    move at the same PAN_SPEED_PX_PER_SEC, so the initial 2D motion is
+    always exactly one of 4 diagonal directions, 90 degrees apart - picking
+    any (dir_x, dir_y) tuple other than a sibling panel's guarantees at
+    least a 90 degree difference. `avoid_direction`, if given, is that
+    sibling's (dir_x, dir_y): if this panel's own random pick would
+    collide with it, the x-axis phase is flipped to the opposite half of
+    its wave (a phase shift of exactly max_dx, i.e. half the wave's
+    period), which breaks the tie deterministically without re-rolling the
+    whole random draw.
     """
     oversized = _oversized_crop(image_path, panel_w, panel_h, headroom)
     oversized_path = os.path.join(tmp_dir, f"pan_src_{cache_key}.jpg")
@@ -592,9 +609,26 @@ def _build_panning_image_clip(
     ow, oh = oversized.size
     max_dx, max_dy = ow - panel_w, oh - panel_h
 
-    rng = random.Random(seed)
+    # `seed` alone is derived from the tile's position (story number, tile
+    # index, region index) - for a fixed video shape (e.g. every single-page
+    # test run: story 1, tile 0) that position repeats identically run after
+    # run regardless of which image actually landed there, so the pan
+    # direction looked frozen instead of random. Folding in a hash of the
+    # image path ties the seed to the actual content, so a different image
+    # (the common case - almost every run fetches a different photo) gets a
+    # different starting direction, while the same image still reproduces
+    # the same pan deterministically.
+    path_hash = int(hashlib.md5(image_path.encode()).hexdigest()[:8], 16)
+    rng = random.Random(seed ^ path_hash)
     phase_x = rng.uniform(0, 2 * max_dx) if max_dx > 0 else 0
     phase_y = rng.uniform(0, 2 * max_dy) if max_dy > 0 else 0
+
+    dir_x = 1 if phase_x <= max_dx else -1
+    dir_y = 1 if phase_y <= max_dy else -1
+
+    if avoid_direction is not None and (dir_x, dir_y) == avoid_direction and max_dx > 0:
+        phase_x = (phase_x + max_dx) % (2 * max_dx)
+        dir_x = -dir_x
 
     raw_clip = ImageClip(oversized_path).with_duration(duration)
 
@@ -604,7 +638,8 @@ def _build_panning_image_clip(
         return (-x, -y)
 
     panning_clip = raw_clip.with_position(pan_position)
-    return CompositeVideoClip([panning_clip], size=(panel_w, panel_h)).with_duration(duration)
+    clip = CompositeVideoClip([panning_clip], size=(panel_w, panel_h)).with_duration(duration)
+    return clip, (dir_x, dir_y)
 
 
 BACKDROP_ALPHA = 120  # translucent (~47% opacity): the drifting glow blobs
@@ -702,14 +737,22 @@ def _build_two_image_layers(
     blobs (story/tile index) - offset per region_idx (image1 vs image2) so
     the two panels in one tile pan differently from each other, while
     staying reproducible.
+
+    When there are two regions, the second is explicitly forced to start
+    panning in a different direction than the first (see `avoid_direction`
+    on _build_panning_image_clip) - previously each panel's direction was
+    independently random, which meant two panels landing on the same
+    starting direction "by chance" was a real, regularly-observed outcome
+    rather than an edge case.
     """
     regions = _image_source_regions(image_path_1, image_path_2, zones)
     layers = []
+    prev_direction = None
     for region_idx, (r_top, r_bottom, path) in enumerate(regions):
         panel_h = int(round(r_bottom - r_top))
         if panel_h <= 0:
             continue
-        panel_clip = _build_panning_image_clip(
+        panel_clip, direction = _build_panning_image_clip(
             path,
             W,
             panel_h,
@@ -718,28 +761,126 @@ def _build_two_image_layers(
             tmp_dir,
             f"{cache_key}_{region_idx}",
             seed=seed_base * 10 + region_idx,
+            avoid_direction=prev_direction,
         )
+        prev_direction = direction
         layers.append(panel_clip.with_position((0, r_top)))
 
-    # Thin divider line in BORDER_COLOR, ONLY at a seam where two images
-    # directly touch each other with zero gap (e.g. text_top's continuous
-    # 2-image stack) - NOT around each panel's own outer edges (that
-    # per-panel border was removed per explicit instruction). text_middle's
-    # two images are separated by the text zone, not adjacent to each
-    # other, so no divider applies there - there's nothing to mark a seam
-    # between.
-    DIVIDER_THICKNESS = 3
-    for (top_a, bottom_a, _), (top_b, _, _) in zip(regions, regions[1:]):
-        if abs(top_b - bottom_a) > 0.5:
-            continue  # not directly adjacent - no seam to mark
-        seam_y = int(round(bottom_a))
-        divider_img = Image.new("RGBA", (W, DIVIDER_THICKNESS), (*BORDER_COLOR, 255))
-        divider_path = os.path.join(tmp_dir, f"divider_{cache_key}_{seam_y}.png")
-        divider_img.save(divider_path)
-        divider_clip = ImageClip(divider_path).with_duration(duration)
-        layers.append(divider_clip.with_position((0, seam_y - DIVIDER_THICKNESS // 2)))
-
     return layers
+
+
+# Traveling "bulge" seam line: a thin, mostly-flat accent-colored line that
+# marks the real boundary between the text zone and whichever image sits
+# next to it, with one point pulsing thicker and sliding along the line
+# over time (like a pulse traveling down a wire) - replaces the old fixed
+# BORDER_COLOR divider, which only ever marked incidental image-to-image
+# adjacency, not the actual text/image boundary, and never moved.
+SEAM_LINE_HEIGHT = 24  # texture canvas height - tall enough to hold the
+# peak thickness plus a little antialiasing headroom without clipping.
+SEAM_LINE_BASE_THICKNESS = 3
+SEAM_LINE_PEAK_THICKNESS = 12
+SEAM_BULGE_SOFTNESS = 60  # px - Gaussian sigma controlling how wide the
+# bulge's falloff is; larger = a broader, gentler bump, smaller = a tighter
+# spike. Deliberately a smooth Gaussian, not a jagged sine/equalizer wave.
+SEAM_LINE_SPEED_PX_PER_SEC = 220  # how fast the bulge travels along the line
+
+
+def _make_seam_line_texture(color: tuple[int, int, int], period_width: int = W) -> Image.Image:
+    """
+    A thin horizontal line at SEAM_LINE_BASE_THICKNESS, with one point
+    bulging up to SEAM_LINE_PEAK_THICKNESS via a smooth Gaussian falloff.
+    Built TWO PERIODS wide (2 * period_width, one bulge per period) so an
+    ImageClip built from it can be positioned by simply shifting left by
+    `(t * speed) % period_width`: since the pattern repeats identically
+    every period_width, whichever period_width-wide window that shift
+    reveals is always a complete, continuous line - the wrap-around point
+    is never visible as a seam, even mid-cycle.
+
+    The bulge's distance is measured circularly WITHIN each period (via
+    `min(dist, period_width - dist)`), not just from a single fixed point,
+    so the two periods in the texture are pixel-identical and the bulge
+    itself wraps smoothly at each period boundary rather than only at the
+    texture's own left/right edges.
+    """
+    texture_w = period_width * 2
+    x = np.arange(texture_w)
+    phase = x % period_width
+    bulge_center = period_width / 2
+    dist = np.abs(phase - bulge_center)
+    dist = np.minimum(dist, period_width - dist)
+    thickness = SEAM_LINE_BASE_THICKNESS + (
+        SEAM_LINE_PEAK_THICKNESS - SEAM_LINE_BASE_THICKNESS
+    ) * np.exp(-(dist**2) / (2 * SEAM_BULGE_SOFTNESS**2))
+
+    y = np.arange(SEAM_LINE_HEIGHT).reshape(-1, 1)
+    center_y = SEAM_LINE_HEIGHT / 2
+    dist_y = np.abs(y - center_y)
+    half_thickness = thickness / 2  # shape (texture_w,), broadcasts against dist_y
+
+    # Soft ~1px antialiased edge instead of a hard pixel cutoff: alpha
+    # ramps from 0 to 1 over the last 1px of each column's half-thickness.
+    alpha = np.clip(half_thickness - dist_y + 0.5, 0, 1)
+    alpha = (alpha * 255).astype(np.uint8)
+
+    rgba = np.zeros((SEAM_LINE_HEIGHT, texture_w, 4), dtype=np.uint8)
+    rgba[..., 0] = color[0]
+    rgba[..., 1] = color[1]
+    rgba[..., 2] = color[2]
+    rgba[..., 3] = alpha
+    return Image.fromarray(rgba, mode="RGBA")
+
+
+def _seam_line_clips(
+    variant: str,
+    zones: dict,
+    has_images: bool,
+    accent: tuple[int, int, int],
+    duration: float,
+    tmp_dir: str,
+    cache_key: str,
+    seed: int,
+):
+    """
+    Traveling accent-colored seam lines marking the real boundary between
+    the text zone and the image(s) beside it. Both lines sit entirely
+    within the adjacent image's own zone, flush against the text zone
+    boundary, never crossing into it (so they never sit under, let alone
+    overlap, the actual text glyphs, which are drawn later still).
+
+    - Bottom line: present whenever there are any images at all, in BOTH
+      layout variants - images always fill the space below the text zone.
+    - Top line: ONLY for "text_middle". "text_top" pins the text zone to
+      the frame's own top edge (see _zone_bounds), so there's never an
+      image above it to mark a boundary against.
+    - The two lines always travel in opposite directions from each other
+      (enforced directly, not left to chance).
+    - `seed` follows the same per-tile seeding already used for this
+      tile's blobs/images (story/tile index) purely to vary each tile's
+      starting bulge position a little, while staying reproducible run to
+      run - not because direction or presence is ever randomized.
+    """
+    if not has_images:
+        return []
+
+    rng = random.Random(seed)
+    phase_offset = rng.uniform(0, W)
+
+    texture_path = os.path.join(tmp_dir, f"seam_{cache_key}.png")
+    _make_seam_line_texture(accent).save(texture_path)
+
+    def make_line(y_top: float, direction: int):
+        def position(t):
+            offset = (phase_offset + direction * t * SEAM_LINE_SPEED_PX_PER_SEC) % W
+            return (-offset, y_top)
+
+        return ImageClip(texture_path).with_duration(duration).with_position(position)
+
+    zone_text_top, zone_text_bottom = zones["text"]
+    lines = []
+    if variant == "text_middle":
+        lines.append(make_line(zone_text_top - SEAM_LINE_HEIGHT, direction=1))
+    lines.append(make_line(zone_text_bottom, direction=-1))
+    return lines
 
 
 def _story_badge(text: str, duration: float, accent: tuple[int, int, int]):
@@ -814,12 +955,12 @@ def _build_title_tile(
     # via size=(...) rather than left for TextClip to auto-compute, since its
     # own auto-sizing is what clips the last line in the first place (see
     # that function's docstring).
-    wrapped_headline = _wrap_text(headline, FONT_BOLD, 68, TEXT_W)
-    headline_h = _measure_wrapped_text_height(wrapped_headline, FONT_BOLD, 68)
+    wrapped_headline = _wrap_text(headline, FONT_BOLD, 51, TEXT_W)
+    headline_h = _measure_wrapped_text_height(wrapped_headline, FONT_BOLD, 51)
     headline_clip = TextClip(
         font=FONT_BOLD,
         text=wrapped_headline,
-        font_size=68,
+        font_size=51,
         color="white",
         size=(TEXT_W, headline_h),
         method="label",
@@ -878,6 +1019,12 @@ def _build_title_tile(
         _build_two_image_layers(
             image_path, image_path_2, zones, accent, duration, tmp_dir, f"{story_number}_title",
             seed_base=story_number * 10,
+        )
+    )
+    layers.extend(
+        _seam_line_clips(
+            variant, zones, bool(image_path or image_path_2), accent, duration, tmp_dir,
+            f"{story_number}_title", seed=story_number * 10,
         )
     )
     layers.extend([backdrop_clip, headline_clip, hook_clip])
@@ -964,6 +1111,12 @@ def _build_detail_tile(
         _build_two_image_layers(
             image_path, image_path_2, zones, accent, duration, tmp_dir, f"{story_number}_{tile_index}",
             seed_base=story_number * 10 + tile_index,
+        )
+    )
+    layers.extend(
+        _seam_line_clips(
+            variant, zones, bool(image_path or image_path_2), accent, duration, tmp_dir,
+            f"{story_number}_{tile_index}", seed=story_number * 10 + tile_index,
         )
     )
     layers.extend([backdrop_clip, body_clip])

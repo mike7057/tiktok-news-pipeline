@@ -1,7 +1,16 @@
 """
 Turns raw headlines + RSS snippets into short, original voiceover scripts
-using the Claude API. Uses Haiku since this is a simple, short task and
-keeps per-run cost tiny (a handful of cents at most for 5 stories/day).
+using the Claude API. Uses Sonnet 5, not Haiku, specifically for hook-
+writing quality: testing showed Haiku was inconsistently redundant with
+the headline (roughly half of hooks across multiple test runs just
+restated the headline in different words, despite explicit prompt
+instructions and examples against it) - a genuine instruction-following
+ceiling, not a prompt-wording problem, confirmed by testing progressively
+more explicit prompt fixes with only partial improvement. Sonnet 5
+followed the same instructions reliably. Cost impact is still small in
+absolute terms (~2-3x Haiku's per-token rate on a short task), so the
+quality gain was judged worth the small added cost - a deliberate choice,
+not an oversight to "optimize" back to Haiku later.
 
 Each story becomes 3 script parts, matching the 3-tile video format:
   parts[0] = hook       - one short sentence, read on the title tile

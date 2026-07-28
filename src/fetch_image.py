@@ -138,6 +138,36 @@ def download_image(image_url: str, output_path: str) -> str | None:
         return None
 
 
+MIN_IMAGE_WIDTH = 600
+MIN_IMAGE_HEIGHT = 400
+# A floor for "looks reasonable on a phone screen" - low enough to accept
+# ordinary web content photos (which typically run 600-1200px+), high
+# enough to reject the tiny inline thumbnails/icons/related-article
+# previews that occasionally slip through _NON_CONTENT_PATTERN and the
+# <200px width/height ATTRIBUTE filter in find_second_image_candidates
+# (which only catches images that declare their small size in the HTML
+# itself - many don't, and a real example downloaded fine at only 6KB).
+# assemble_video's _oversized_crop upscales whatever it's given via LANCZOS
+# to fill its target panel regardless of source size, so an
+# under-resolution source doesn't fail loudly - it just renders soft/
+# blurry, which is what this floor exists to catch before that happens.
+
+
+def _meets_min_resolution(image_path: str) -> bool:
+    """True if the downloaded image's ACTUAL decoded pixel dimensions clear
+    MIN_IMAGE_WIDTH/MIN_IMAGE_HEIGHT - not any HTML width/height attribute
+    (which can be missing, wrong, or a percentage), the same principle as
+    images_are_near_duplicates comparing real pixel content rather than
+    trusting metadata. A file that can't even be opened as an image fails
+    this check too - never let a corrupt download pass the quality bar."""
+    try:
+        with Image.open(image_path) as img:
+            width, height = img.size
+    except Exception:
+        return False
+    return width >= MIN_IMAGE_WIDTH and height >= MIN_IMAGE_HEIGHT
+
+
 def _average_hash(image_path: str, hash_size: int = 8) -> int:
     """
     Simple perceptual hash (aHash): grayscale + shrink to hash_size x
@@ -209,23 +239,39 @@ def fetch_story_images(
     is returned as None (NOT the primary reused) - the caller/renderer is
     expected to show a single available image at full size rather than the
     same photo pasted into both slots, which reads as an obvious repeat.
-    Returns (path_1_or_None, path_2_or_None) - both None only if the
-    primary image itself couldn't be found/downloaded at all.
+    Returns (path_1_or_None, path_2_or_None) - both None only if no usable
+    image could be found for this story at all.
+
+    Every downloaded candidate (primary AND second-image candidates) must
+    clear MIN_IMAGE_WIDTH/MIN_IMAGE_HEIGHT (see _meets_min_resolution) -
+    real content photos on these sites are generally well above that, but
+    an occasional inline thumbnail/icon slips through the HTML-level
+    filters in find_second_image_candidates, and og:image itself isn't
+    always a genuine content photo either. If the primary fails that bar,
+    it's not just discarded outright - the second-image search still runs
+    (excluding that URL) and the first candidate that both downloads and
+    meets the resolution floor is promoted to fill the primary slot
+    instead, since one good image beats zero.
 
     Tries EVERY second-image candidate found on the page (in document
     order), not just the first - the first candidate turning out to be a
-    near-duplicate of the primary (or failing to download) doesn't mean no
-    genuinely distinct image exists; it may just mean the first one wasn't
-    it. Stops at the first candidate that downloads successfully and isn't
-    a near-duplicate of the primary.
+    near-duplicate of the primary, too small, or failing to download
+    doesn't mean no genuinely distinct/usable image exists; it may just
+    mean the first one wasn't it.
     """
     primary_url = find_image_url(media_url, article_url)
-    if not primary_url:
-        return None, None
-
-    primary_path = download_image(primary_url, output_path_1)
-    if not primary_path:
-        return None, None
+    primary_path = None
+    if primary_url:
+        downloaded = download_image(primary_url, output_path_1)
+        if downloaded and _meets_min_resolution(downloaded):
+            primary_path = downloaded
+        elif downloaded:
+            print(
+                f"    (primary image {primary_url} is below the "
+                f"{MIN_IMAGE_WIDTH}x{MIN_IMAGE_HEIGHT} quality floor - looking for an "
+                "alternative)",
+                file=sys.stderr,
+            )
 
     candidates = []
     try:
@@ -235,25 +281,44 @@ def fetch_story_images(
     except Exception as e:
         print(f"    (could not search for a second image on {article_url}: {e})", file=sys.stderr)
 
-    for candidate_url in candidates:
-        second_path = download_image(candidate_url, output_path_2)
-        if not second_path:
-            continue
-        if images_are_near_duplicates(primary_path, second_path):
-            print(
-                f"    (second image candidate {candidate_url} looks like a duplicate of "
-                "the primary - trying the next candidate)",
-                file=sys.stderr,
-            )
-            continue
-        return primary_path, second_path
+    if primary_path:
+        for candidate_url in candidates:
+            second_path = download_image(candidate_url, output_path_2)
+            if not second_path:
+                continue
+            if not _meets_min_resolution(second_path):
+                print(
+                    f"    (second image candidate {candidate_url} is below the "
+                    f"{MIN_IMAGE_WIDTH}x{MIN_IMAGE_HEIGHT} quality floor - trying the next "
+                    "candidate)",
+                    file=sys.stderr,
+                )
+                continue
+            if images_are_near_duplicates(primary_path, second_path):
+                print(
+                    f"    (second image candidate {candidate_url} looks like a duplicate of "
+                    "the primary - trying the next candidate)",
+                    file=sys.stderr,
+                )
+                continue
+            return primary_path, second_path
 
-    # No distinct second image found (either no candidates existed, none
-    # downloaded successfully, or every one turned out to be a duplicate of
-    # the primary) - return just the primary. The renderer shows a single
-    # available image at full size rather than pasting the same photo into
-    # both slots.
-    return primary_path, None
+        # No distinct, sufficiently large second image found - return just
+        # the primary. The renderer shows a single available image at full
+        # size rather than pasting the same photo into both slots.
+        return primary_path, None
+
+    # No usable primary (missing entirely, or below the quality floor) -
+    # fall back to the first second-image candidate that both downloads and
+    # meets the resolution floor, promoted to fill the sole image slot
+    # instead of leaving the story with no image at all.
+    for candidate_url in candidates:
+        fallback_path = download_image(candidate_url, output_path_1)
+        if not fallback_path or not _meets_min_resolution(fallback_path):
+            continue
+        return fallback_path, None
+
+    return None, None
 
 
 if __name__ == "__main__":

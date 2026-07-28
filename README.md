@@ -89,9 +89,17 @@ Output lands in `output/` at the repo root.
 |-----------------------|------------------------------------------|
 | GitHub Actions compute | Free (well under the 2,000 free min/mo) |
 | Google News RSS        | Free, no key                            |
-| Claude API (Haiku)     | Roughly a few cents/day for 5 short summaries |
+| Claude API (Sonnet 5)  | Roughly 1-3 cents/day for 5 short summaries |
 | edge-tts               | Free, no key                            |
 | Storage (artifact)     | Free, auto-deleted after 14 days        |
 
-Total: realistically **a few cents to a couple dollars a month**, driven
-almost entirely by Claude API usage.
+Script/hook writing uses Sonnet 5 rather than Haiku — testing found Haiku
+inconsistently restated the headline in its hooks even with explicit
+prompt instructions against it, while Sonnet 5 followed the same
+instructions reliably. That's ~2x Haiku's per-token rate through Aug 31,
+2026 ($2/$10 vs $1/$5 per million input/output tokens), rising to ~3x
+after ($3/$15) — still a small absolute cost for a handful of short
+summaries a day.
+
+Total: realistically **a dime to a few dollars a month**, driven almost
+entirely by Claude API usage.
