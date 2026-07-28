@@ -9,15 +9,16 @@ Finds and downloads up to 2 real, story-specific images for a news item:
      heuristic, not a guarantee: unlike og:image (a single well-defined,
      universally-supported tag), there's no equivalently reliable convention
      for "the second most relevant image" - site HTML structures vary
-     widely. If no distinct second image is found, only the primary is
-     returned (the second slot is None) rather than pasting the same photo
-     into both slots - showing one image once reads as deliberate; showing
-     it twice reads as an obvious, lazy-looking repeat. A candidate second
-     image is also checked against the primary with a perceptual hash
-     (images_are_near_duplicates) and discarded on the same basis if it's
-     really just a different-sized rendition of the same photo - confirmed
-     to happen in practice (a site's og:image and an in-article <img>
-     pointing at the same screenshot under two different URLs).
+     widely. Every candidate found on the page is tried in document order
+     (not just the first) until one downloads successfully and isn't a
+     near-duplicate of the primary (via perceptual hash,
+     images_are_near_duplicates) - a site serving the same underlying photo
+     at two different sizes/URLs is a confirmed real case, and one
+     duplicate candidate shouldn't rule out every other image on the page.
+     If every candidate is exhausted without finding a distinct one, only
+     the primary is returned (the second slot is None) rather than pasting
+     the same photo into both slots - showing one image once reads as
+     deliberate; showing it twice reads as an obvious, lazy-looking repeat.
 
 Every image sourced this way should get a quick human glance before a video
 posts (confirm it's genuinely the right image for the story) - this is even
@@ -66,21 +67,25 @@ def find_image_url(media_url: str | None, article_url: str) -> str | None:
     return None
 
 
-def find_second_image_url(html: str, base_url: str, exclude_url: str | None) -> str | None:
+def find_second_image_candidates(html: str, base_url: str, exclude_url: str | None) -> list[str]:
     """
-    Looks for a second, genuinely different content image within the
-    article page's own HTML - scoped to <article> or <main> if present (to
-    avoid header/footer/sidebar noise), skipping anything matching
+    Looks for candidate second, genuinely different content images within
+    the article page's own HTML - scoped to <article> or <main> if present
+    (to avoid header/footer/sidebar noise), skipping anything matching
     exclude_url (the primary image already chosen), SVGs (almost always
     icons), anything matching _NON_CONTENT_PATTERN, and anything with
-    width/height attributes indicating a small (<200px) image. Returns the
-    first remaining candidate's absolute URL, or None if nothing suitable
-    is found.
+    width/height attributes indicating a small (<200px) image. Returns
+    EVERY remaining candidate's absolute URL, in document order - not just
+    the first - so fetch_story_images can try each one in turn until it
+    finds a genuinely distinct image, rather than giving up entirely the
+    moment the very first candidate turns out to be a near-duplicate of
+    the primary or fails to download.
     """
     soup = BeautifulSoup(html, "html.parser")
     scope = soup.find("article") or soup.find("main") or soup
 
     exclude_key = exclude_url.split("?")[0] if exclude_url else None
+    candidates = []
 
     for img in scope.find_all("img"):
         src = img.get("src") or img.get("data-src")
@@ -115,9 +120,10 @@ def find_second_image_url(html: str, base_url: str, exclude_url: str | None) -> 
         except ValueError:
             pass  # non-numeric width/height (e.g. "100%") - don't filter on it
 
-        return absolute_url
+        if absolute_url not in candidates:  # the same <img> URL can appear more than once
+            candidates.append(absolute_url)
 
-    return None
+    return candidates
 
 
 def download_image(image_url: str, output_path: str) -> str | None:
@@ -205,6 +211,13 @@ def fetch_story_images(
     same photo pasted into both slots, which reads as an obvious repeat.
     Returns (path_1_or_None, path_2_or_None) - both None only if the
     primary image itself couldn't be found/downloaded at all.
+
+    Tries EVERY second-image candidate found on the page (in document
+    order), not just the first - the first candidate turning out to be a
+    near-duplicate of the primary (or failing to download) doesn't mean no
+    genuinely distinct image exists; it may just mean the first one wasn't
+    it. Stops at the first candidate that downloads successfully and isn't
+    a near-duplicate of the primary.
     """
     primary_url = find_image_url(media_url, article_url)
     if not primary_url:
@@ -214,29 +227,30 @@ def fetch_story_images(
     if not primary_path:
         return None, None
 
-    second_url = None
+    candidates = []
     try:
         resp = requests.get(article_url, headers={"User-Agent": USER_AGENT}, timeout=15)
         resp.raise_for_status()
-        second_url = find_second_image_url(resp.text, article_url, exclude_url=primary_url)
+        candidates = find_second_image_candidates(resp.text, article_url, exclude_url=primary_url)
     except Exception as e:
         print(f"    (could not search for a second image on {article_url}: {e})", file=sys.stderr)
 
-    if second_url:
-        second_path = download_image(second_url, output_path_2)
-        if second_path:
-            if images_are_near_duplicates(primary_path, second_path):
-                print(
-                    f"    (second image at {second_url} looks like a duplicate of the "
-                    "primary - dropping it, showing just the primary)",
-                    file=sys.stderr,
-                )
-            else:
-                return primary_path, second_path
+    for candidate_url in candidates:
+        second_path = download_image(candidate_url, output_path_2)
+        if not second_path:
+            continue
+        if images_are_near_duplicates(primary_path, second_path):
+            print(
+                f"    (second image candidate {candidate_url} looks like a duplicate of "
+                "the primary - trying the next candidate)",
+                file=sys.stderr,
+            )
+            continue
+        return primary_path, second_path
 
-    # No distinct second image found (either nothing else was found, it
-    # failed to download, or it turned out to be a duplicate of the
-    # primary) - return just the primary. The renderer shows a single
+    # No distinct second image found (either no candidates existed, none
+    # downloaded successfully, or every one turned out to be a duplicate of
+    # the primary) - return just the primary. The renderer shows a single
     # available image at full size rather than pasting the same photo into
     # both slots.
     return primary_path, None

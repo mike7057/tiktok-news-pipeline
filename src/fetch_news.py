@@ -26,13 +26,19 @@ GOOGLE_NEWS_RSS = "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en"
 # feeds are fresher and more reliable than routing through Google News search.
 # These update the moment an article publishes - no aggregator lag.
 MULTI_FEED_TOPICS = {
+    # GameSpot deliberately excluded: confirmed its RSS entries only ever
+    # carry one small (~300x169) thumbnail and its article pages sit behind
+    # active Cloudflare bot-challenge protection (a real "Just a moment..."
+    # JS-interstitial, not just a User-Agent check - a plain HTTP request
+    # can never get past it), so a second story-specific image can never be
+    # found for a GameSpot story. It was still winning the significance
+    # ranking often enough that most videos ended up single-image.
     "gaming": [
         "https://www.ign.com/rss",
         "https://kotaku.com/rss",
         "https://www.polygon.com/rss/index.xml",
         "https://www.pcgamer.com/rss/",
         "https://www.eurogamer.net/feed",
-        "https://www.gamespot.com/feeds/news/",
     ],
 }
 

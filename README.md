@@ -71,8 +71,11 @@ Output lands in `output/` at the repo root.
   sports, entertainment, science, health, world). Edit `TOPIC_FEEDS` in
   `src/main.py` to add more.
 - **Story count**: `--count 3` for a shorter video.
-- **Voice**: change `VOICE` in `src/generate_audio.py` — run
-  `edge-tts --list-voices` to see all options.
+- **Narration audio**: off by default — videos are silent/read-only, with
+  each story's video capped at a flat 10 seconds. Pass `--audio` to
+  re-enable edge-tts narration (duration then follows the narration length
+  instead of the flat cap). Voice is set via `VOICE` in
+  `src/generate_audio.py` — run `edge-tts --list-voices` to see all options.
 - **Visual style**: colors, fonts, and layout are all in
   `src/assemble_video.py` (`ACCENT_COLORS`, `FONT_BOLD`, position tuples).
   Everything is generated on the fly with Pillow, so there's no stock

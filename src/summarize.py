@@ -20,7 +20,7 @@ from fetch_news import _tokenize
 
 load_dotenv()
 
-MODEL = "claude-haiku-4-5-20251001"
+MODEL = "claude-sonnet-5"
 
 SYSTEM_PROMPT = """You write short voiceover scripts for a daily TikTok news recap video. \
 Each story gets its own 3-screen mini-segment:
@@ -29,12 +29,39 @@ Each story gets its own 3-screen mini-segment:
   - two follow-up "detail" lines, each shown on its own screen after that
 
 For EACH story you're given, write a "parts" array of exactly 3 strings:
-  1. hook - ONE short sentence (roughly 10-15 words, ~4-5 seconds read aloud) that \
-restates or introduces the headline conversationally - not a verbatim repeat of the headline
+  1. hook - ONE short sentence (roughly 10-15 words, ~4-5 seconds read aloud). The viewer has \
+ALREADY read the headline before this line plays - never restate what the headline already \
+conveys (the subject, the name, the timing, what happened). Instead, continue the story: add \
+a new fact, a specific detail, or an implication the headline didn't already say. If you can't \
+think of anything genuinely new to add, it's better to move straight into detail_1's content \
+than to pad the hook with a rephrased headline.
   2. detail_1 - one to two sentences (roughly 25-35 words, ~8-10 seconds read aloud) giving \
-more specifics about what happened
+more specifics about what happened - assume the hook already moved past the headline's own \
+facts, so keep building forward (specifics, mechanics, numbers) rather than circling back to \
+re-confirm what/when/who
   3. detail_2 - one to two sentences (roughly 25-35 words, ~8-10 seconds read aloud) adding \
 context, implications, or what happens next
+
+  Too redundant (hook just repeats the headline's own facts):
+  Headline: "Pokopia's First Major DLC, Bubbly Basin, Is Out Next Week"
+  Hook: "Pokemon Pokopia's getting its first major expansion next week."
+
+  Better (hook continues rather than restates):
+  Hook: "It's an underwater-themed expansion, and it's just the first of a whole planned \
+content pass for the game."
+
+  A hook can look like it's following the rule while still mostly failing it - watch for a new \
+clause bolted onto an otherwise-restated sentence, not just full-sentence restatement.
+
+  Still too redundant (only the back half is new - the front half repeats "First Major DLC," \
+"Bubbly Basin," and "Next Week" almost word-for-word):
+  Headline: "Pokopia's First Major DLC, Bubbly Basin, Is Out Next Week"
+  Hook: "The first big expansion pack, Bubbly Basin, launches next week with an underwater \
+theme and more content on the way."
+
+  Better (drops the restated setup entirely, leads with what's new):
+  Hook: "It's an underwater-themed expansion, and it's just the first of a planned content \
+pass for the game."
 
 All 3 parts must together read naturally as one continuous mini-story, each written entirely \
 in your own words - never copy phrasing from the source snippet. No "Story #1:" labels, no \
@@ -97,6 +124,14 @@ Return ONLY a JSON array of objects, one per story, in the same order given, eac
 No markdown formatting, no code fences, no extra commentary - just the raw JSON array."""
 
 
+def _response_text(response) -> str:
+    """Returns the first text block's content, skipping any thinking blocks."""
+    for block in response.content:
+        if block.type == "text":
+            return block.text
+    raise ValueError(f"No text block in response content: {response.content}")
+
+
 def _parse_json_response(text: str):
     text = text.strip()
     if text.startswith("```"):
@@ -125,7 +160,7 @@ def summarize_stories(stories: list[dict], api_key: str | None = None) -> list[l
         messages=[{"role": "user", "content": stories_text}],
     )
 
-    parsed = _parse_json_response(response.content[0].text)
+    parsed = _parse_json_response(_response_text(response))
 
     if len(parsed) != len(stories):
         raise ValueError(f"Expected {len(stories)} entries back, got {len(parsed)}. Raw: {parsed}")
@@ -171,14 +206,41 @@ Each selected story gets its own 3-screen mini-segment in the video:
   - two follow-up "detail" lines, each shown on its own screen after that
 
 For each selection, write a "parts" array of exactly 3 strings:
-  1. hook - ONE short sentence (roughly 10-15 words, ~4-5 seconds read aloud) that \
-restates or introduces the headline conversationally - not a verbatim repeat of the headline
+  1. hook - ONE short sentence (roughly 10-15 words, ~4-5 seconds read aloud). The viewer has \
+ALREADY read the headline before this line plays - never restate what the headline already \
+conveys (the subject, the name, the timing, what happened). Instead, continue the story: add \
+a new fact, a specific detail, or an implication the headline didn't already say. If you can't \
+think of anything genuinely new to add, it's better to move straight into detail_1's content \
+than to pad the hook with a rephrased headline.
   2. detail_1 - one to two sentences (roughly 25-35 words, ~8-10 seconds read aloud) giving \
 more specifics about what happened, drawing on every snippet/candidate you merged into this \
-selection - not just whichever one happened to be listed first
+selection - not just whichever one happened to be listed first. Assume the hook already moved \
+past the headline's own facts, so keep building forward (specifics, mechanics, numbers) rather \
+than circling back to re-confirm what/when/who
   3. detail_2 - one to two sentences (roughly 25-35 words, ~8-10 seconds read aloud) adding \
 context, implications, or what happens next - if you merged multiple candidates, this is a \
 good place to bring in the second angle (e.g. critical reception) alongside the main event
+
+  Too redundant (hook just repeats the headline's own facts):
+  Headline: "Pokopia's First Major DLC, Bubbly Basin, Is Out Next Week"
+  Hook: "Pokemon Pokopia's getting its first major expansion next week."
+
+  Better (hook continues rather than restates):
+  Hook: "It's an underwater-themed expansion, and it's just the first of a whole planned \
+content pass for the game."
+
+  A hook can look like it's following the rule while still mostly failing it - watch for a new \
+clause bolted onto an otherwise-restated sentence, not just full-sentence restatement.
+
+  Still too redundant (only the back half is new - the front half repeats "First Major DLC," \
+"Bubbly Basin," and "Next Week" almost word-for-word):
+  Headline: "Pokopia's First Major DLC, Bubbly Basin, Is Out Next Week"
+  Hook: "The first big expansion pack, Bubbly Basin, launches next week with an underwater \
+theme and more content on the way."
+
+  Better (drops the restated setup entirely, leads with what's new):
+  Hook: "It's an underwater-themed expansion, and it's just the first of a planned content \
+pass for the game."
 
 All 3 parts must together read naturally as one continuous mini-story, each written entirely \
 in your own words - never copy phrasing from any snippet.
@@ -333,7 +395,7 @@ def select_and_summarize(
         messages=[{"role": "user", "content": candidates_text}],
     )
 
-    selections = _parse_json_response(response.content[0].text)
+    selections = _parse_json_response(_response_text(response))
 
     used_indices: set[int] = set()
     results = []
@@ -426,7 +488,7 @@ def generate_captions(
     )
 
     try:
-        raw_results = _parse_json_response(response.content[0].text)
+        raw_results = _parse_json_response(_response_text(response))
     except (json.JSONDecodeError, ValueError, IndexError):
         raw_results = []
 

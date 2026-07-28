@@ -2,13 +2,16 @@
 Orchestrates the full daily pipeline:
   1. Fetch top 5 headlines (Google News RSS - free)
   2. Summarize each into a 3-part script (hook + 2 detail lines) via Claude API
-  3. Render narration audio for each of the 3 parts per story (edge-tts - free)
+  3. Render narration audio for each of the 3 parts per story (edge-tts - free) -
+     OFF by default (pass --audio to enable); without it, each story's video
+     is silent/read-only and capped at a flat 10 seconds.
   4. Assemble everything into one vertical video, 3 tiles per story
      (moviepy + ffmpeg)
 
 Usage:
     python main.py                  # top 5 general news
     python main.py --count 5 --topic technology
+    python main.py --audio          # re-enable narration audio
 Output:
     output/top5_YYYY-MM-DD.mp4
     output/top5_YYYY-MM-DD_script.txt   (so you can read what was said before posting)
@@ -19,6 +22,10 @@ import datetime
 import os
 import shutil
 import sys
+
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
 
 from assemble_video import assemble_individual_videos, assemble_video, group_parts_for_slides
 from fetch_news import (
@@ -74,13 +81,23 @@ def run(
     tmp_dir: str,
     video_format: str = "individual",
     slides_per_story: int = 1,
+    generate_audio_enabled: bool = False,
 ):
     today = datetime.date.today().isoformat()
     label = query or topic or "general"
     use_significance_ranking = bool(topic and topic in MULTI_FEED_TOPICS and not query)
 
     if use_significance_ranking:
-        pool_size = max(count * 4, 20)
+        # Bigger multiplier/floor than the original max(count*4, 20):
+        # pool-gathering is cheap (just RSS parsing - the per-article
+        # og:image/second-image fetches only happen later, for the final
+        # `count` selected stories, not the whole pool), so a larger
+        # candidate pool costs little beyond a bit more Claude prompt size,
+        # while giving the significance ranking a meaningfully wider field
+        # to choose from for daily operation - especially now that
+        # GameSpot (a heavy contributor by entry volume) is no longer one
+        # of the polled feeds.
+        pool_size = max(count * 8, 40)
         print(f"[1/6] Fetching a pool of {pool_size} candidate stories ({label})...")
         candidates = fetch_from_multiple_feeds(MULTI_FEED_TOPICS[topic], pool_size=pool_size)
 
@@ -153,22 +170,33 @@ def run(
         else:
             print(f"    Story {i + 1}: no image found, skipping")
 
-    print("[5/6] Generating narration audio...")
     os.makedirs(tmp_dir, exist_ok=True)
     audio_paths_lists = []
-    total_groups = sum(len(group_parts_for_slides(p, slides_per_story)) for p in parts_lists)
-    rendered = 0
-    for i, parts in enumerate(parts_lists):
-        groups = group_parts_for_slides(parts, slides_per_story)
-        story_audio_paths = []
-        for j, group in enumerate(groups):
-            combined_text = " ".join(parts[k] for k in group)
-            audio_path = os.path.join(tmp_dir, f"narration_{i}_{j}.mp3")
-            generate_audio(combined_text, audio_path)
-            story_audio_paths.append(audio_path)
-            rendered += 1
-            print(f"    Rendered audio {rendered}/{total_groups}")
-        audio_paths_lists.append(story_audio_paths)
+    if generate_audio_enabled:
+        print("[5/6] Generating narration audio...")
+        total_groups = sum(len(group_parts_for_slides(p, slides_per_story)) for p in parts_lists)
+        rendered = 0
+        for i, parts in enumerate(parts_lists):
+            groups = group_parts_for_slides(parts, slides_per_story)
+            story_audio_paths = []
+            for j, group in enumerate(groups):
+                combined_text = " ".join(parts[k] for k in group)
+                audio_path = os.path.join(tmp_dir, f"narration_{i}_{j}.mp3")
+                generate_audio(combined_text, audio_path)
+                story_audio_paths.append(audio_path)
+                rendered += 1
+                print(f"    Rendered audio {rendered}/{total_groups}")
+            audio_paths_lists.append(story_audio_paths)
+    else:
+        # Audio disabled (default - see --audio to re-enable): each tile
+        # gets a flat NO_AUDIO_DURATION instead of an audio-driven one (see
+        # assemble_video.py), so there's nothing to render here - just fill
+        # in the same [[None, ...], ...] shape the assemble_* functions
+        # already expect one real audio path per slide-group.
+        print("[5/6] Narration audio disabled (pass --audio to enable) - skipping...")
+        for parts in parts_lists:
+            groups = group_parts_for_slides(parts, slides_per_story)
+            audio_paths_lists.append([None] * len(groups))
 
     print(f"[6/6] Assembling video ({video_format})...")
     os.makedirs(output_dir, exist_ok=True)
@@ -279,6 +307,23 @@ if __name__ == "__main__":
         "narrated over one still headline+hook screen. Use 3 for the original "
         "one-part-per-screen format. 2 is a middle ground.",
     )
+    parser.add_argument(
+        "--audio",
+        action="store_true",
+        default=False,
+        help="Generate narration audio with edge-tts (default: off - videos are "
+        "silent/read-only, each tile capped at a flat 10s instead of an "
+        "audio-driven length). Pass this flag to re-enable narration.",
+    )
     args = parser.parse_args()
 
-    run(args.count, args.topic, args.query, args.output_dir, args.tmp_dir, args.format, args.slides)
+    run(
+        args.count,
+        args.topic,
+        args.query,
+        args.output_dir,
+        args.tmp_dir,
+        args.format,
+        args.slides,
+        args.audio,
+    )
