@@ -44,11 +44,11 @@ conveys (the subject, the name, the timing, what happened). Instead, continue th
 a new fact, a specific detail, or an implication the headline didn't already say. If you can't \
 think of anything genuinely new to add, it's better to move straight into detail_1's content \
 than to pad the hook with a rephrased headline.
-  2. detail_1 - one to two sentences (roughly 25-35 words, ~8-10 seconds read aloud) giving \
+  2. detail_1 - one to two sentences (roughly 44-61 words, ~14-17 seconds read aloud) giving \
 more specifics about what happened - assume the hook already moved past the headline's own \
 facts, so keep building forward (specifics, mechanics, numbers) rather than circling back to \
 re-confirm what/when/who
-  3. detail_2 - one to two sentences (roughly 25-35 words, ~8-10 seconds read aloud) adding \
+  3. detail_2 - one to two sentences (roughly 44-61 words, ~14-17 seconds read aloud) adding \
 context, implications, or what happens next
 
   Too redundant (hook just repeats the headline's own facts):
@@ -221,12 +221,12 @@ conveys (the subject, the name, the timing, what happened). Instead, continue th
 a new fact, a specific detail, or an implication the headline didn't already say. If you can't \
 think of anything genuinely new to add, it's better to move straight into detail_1's content \
 than to pad the hook with a rephrased headline.
-  2. detail_1 - one to two sentences (roughly 25-35 words, ~8-10 seconds read aloud) giving \
+  2. detail_1 - one to two sentences (roughly 44-61 words, ~14-17 seconds read aloud) giving \
 more specifics about what happened, drawing on every snippet/candidate you merged into this \
 selection - not just whichever one happened to be listed first. Assume the hook already moved \
 past the headline's own facts, so keep building forward (specifics, mechanics, numbers) rather \
 than circling back to re-confirm what/when/who
-  3. detail_2 - one to two sentences (roughly 25-35 words, ~8-10 seconds read aloud) adding \
+  3. detail_2 - one to two sentences (roughly 44-61 words, ~14-17 seconds read aloud) adding \
 context, implications, or what happens next - if you merged multiple candidates, this is a \
 good place to bring in the second angle (e.g. critical reception) alongside the main event
 
@@ -498,6 +498,8 @@ def generate_captions(
 
     try:
         raw_results = _parse_json_response(_response_text(response))
+        if not isinstance(raw_results, list):
+            raw_results = []
     except (json.JSONDecodeError, ValueError, IndexError):
         raw_results = []
 

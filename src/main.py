@@ -6,12 +6,16 @@ Orchestrates the full daily pipeline:
      OFF by default (pass --audio to enable); without it, each story's video
      is silent/read-only and capped at a flat 10 seconds.
   4. Assemble everything into one vertical video, 3 tiles per story
-     (moviepy + ffmpeg)
+     (moviepy + ffmpeg), optionally with background music mixed in (see
+     assets/music/README.md) - ON by default whenever assets/music/ has at
+     least one track (free, no API cost), a no-op otherwise; pass
+     --no-music to disable even if tracks are present.
 
 Usage:
     python main.py                  # top 5 general news
     python main.py --count 5 --topic technology
     python main.py --audio          # re-enable narration audio
+    python main.py --no-music       # disable background music
 Output:
     output/top5_YYYY-MM-DD.mp4
     output/top5_YYYY-MM-DD_script.txt   (so you can read what was said before posting)
@@ -34,7 +38,7 @@ from fetch_news import (
     fetch_from_multiple_feeds,
     fetch_top_stories,
 )
-from fetch_image import fetch_story_images
+from fetch_image import fetch_second_image_from_candidates, fetch_story_images
 from generate_audio import generate_audio
 from summarize import generate_captions, select_and_summarize, summarize_stories
 
@@ -59,6 +63,14 @@ SEARCH_TOPIC_QUERIES = {
     "ai": '"artificial intelligence" OR AI',
 }
 
+# Cap on extra candidate URLs (other outlets already known to cover the
+# same story) tried by the second-image fallback - see the image-fetching
+# step in run(). Only applies to stories that already have a primary image
+# but came up empty on a second one; keeps one stubborn story from blowing
+# up run time chasing a second image that may just not exist anywhere
+# findable.
+MAX_FALLBACK_IMAGE_CANDIDATES = 5
+
 
 def resolve_feed_url(topic: str | None, query: str | None) -> str | None:
     """Priority: explicit --query > fixed topic sections > search-based niche topics > None (general feed).
@@ -82,6 +94,8 @@ def run(
     video_format: str = "individual",
     slides_per_story: int = 1,
     generate_audio_enabled: bool = False,
+    music_enabled: bool = True,
+    music_volume: float = 0.15,
 ):
     today = datetime.date.today().isoformat()
     label = query or topic or "general"
@@ -149,6 +163,36 @@ def run(
         tmp_img_path_1 = os.path.join(tmp_dir, f"visual_{i}_1.jpg")
         tmp_img_path_2 = os.path.join(tmp_dir, f"visual_{i}_2.jpg")
         path1, path2 = fetch_story_images(media_url, article_url, tmp_img_path_1, tmp_img_path_2)
+
+        # Fallback for the specific case where a story already has a primary
+        # image but the same-page second-image heuristic came up empty -
+        # try OTHER ARTICLES about this exact story instead of giving up:
+        # outlets the significance-ranking merge already confirmed cover
+        # this exact story (s["links"]) - free, no new network poll needed
+        # to find them, just to check their own og:image. Only present for
+        # multi-feed/significance-ranked stories; plain single-feed stories
+        # have no "links" key. Never runs for a story that failed to find a
+        # primary at all (path1 is None) - that's a different failure mode.
+        #
+        # (A second tier - a live Google News search for other coverage of
+        # the story - was tried and dropped: Google News' search-result
+        # links are JS-redirect pages that a plain HTTP request can never
+        # resolve to the real publisher page, so every candidate it produced
+        # only ever yielded Google's own tiny interstitial thumbnail,
+        # confirmed via direct testing. Not fixable without either a new
+        # dependency or fragile parsing of Google's undocumented redirect
+        # format, so it's not worth keeping as dead weight.)
+        if path1 and not path2:
+            tried_urls = {article_url}
+            candidates = [
+                link for link in s.get("links", []) if link and link not in tried_urls
+            ][:MAX_FALLBACK_IMAGE_CANDIDATES]
+
+            if candidates:
+                path2 = fetch_second_image_from_candidates(candidates, path1, tmp_img_path_2)
+                if path2:
+                    print(f"    Story {i + 1}: found a second image via an already-known related outlet")
+
         image_paths.append((path1, path2))
 
         # Copy to the output directory too (not just tmp_dir, which gets
@@ -211,6 +255,8 @@ def run(
             filename_prefix=f"top{count}_{today}",
             slides_per_story=slides_per_story,
             image_paths=image_paths,
+            add_music=music_enabled,
+            music_volume=music_volume,
         )
     else:
         combined_path = os.path.join(output_dir, f"top{count}_{today}.mp4")
@@ -223,6 +269,8 @@ def run(
             video_title=f"Top {count} News Today",
             video_subtitle=datetime.date.today().strftime("%B %d, %Y"),
             image_paths=image_paths,
+            add_music=music_enabled,
+            music_volume=music_volume,
         )
         video_paths = [combined_path]
 
@@ -315,6 +363,22 @@ if __name__ == "__main__":
         "silent/read-only, each tile capped at a flat 10s instead of an "
         "audio-driven length). Pass this flag to re-enable narration.",
     )
+    parser.add_argument(
+        "--no-music",
+        action="store_true",
+        default=False,
+        help="Disable background music. Unlike --audio, music is ON by default whenever "
+        "assets/music/ has at least one track - it's free (no API cost), so it just "
+        "works once you drop files in; a true no-op if that folder is still empty. "
+        "Pass this flag to explicitly turn it off even if tracks are present.",
+    )
+    parser.add_argument(
+        "--music-volume",
+        type=float,
+        default=0.15,
+        help="Background music volume as a fraction of the source track's own volume "
+        "(default 0.15). Only matters if music is enabled and assets/music/ has tracks.",
+    )
     args = parser.parse_args()
 
     run(
@@ -326,4 +390,6 @@ if __name__ == "__main__":
         args.format,
         args.slides,
         args.audio,
+        not args.no_music,
+        args.music_volume,
     )

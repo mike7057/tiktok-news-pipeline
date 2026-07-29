@@ -80,6 +80,14 @@ Output lands in `output/` at the repo root.
   `src/assemble_video.py` (`ACCENT_COLORS`, `FONT_BOLD`, position tuples).
   Everything is generated on the fly with Pillow, so there's no stock
   footage/image API dependency to pay for.
+- **Background music**: off until you add tracks — drop license-clear
+  instrumental mp3/wav/m4a files into `assets/music/` (see
+  `assets/music/README.md` for where to find some and how to track
+  licensing) and it turns on automatically, no flag needed, since unlike
+  narration this has no API cost. Tracks loop or trim to fit and rotate
+  deterministically across stories. Pass `--no-music` to disable even with
+  tracks present, or `--music-volume 0.1` to adjust the level (default
+  `0.15`, well under narration).
 - **Posting schedule**: edit the `cron:` line in
   `.github/workflows/daily_news.yml` (cron times are always UTC).
 

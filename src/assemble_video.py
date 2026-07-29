@@ -31,6 +31,8 @@ from moviepy import (
 )
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
+from music import add_background_music
+
 W, H = 1080, 1920
 
 # Font paths are OS-specific: the GitHub Actions runner is Linux (DejaVu),
@@ -334,19 +336,21 @@ BLOB_COLORS = [(255, 71, 87), (255, 165, 2)]  # red, orange - fixed pair used
 # accent color, so every tile consistently shows red/orange orbs rather
 # than following the 5-color ACCENT_COLORS rotation.
 NUM_BLOBS = 4  # doubled from the original 2, per explicit instruction.
-# Blob motion is a bounded back-and-forth wobble (via _triangle_wave, same
-# mechanism as the image pan) around each blob's start position, NOT a
-# one-way slide - an earlier attempt at "10x faster" simply multiplied the
-# old start-to-start+drift distance by 10x, which let blobs drift far
-# enough off-frame to hit a real moviepy crash (a broadcast-shape
-# ValueError from compositing a clip whose visible region had gone to
-# zero) - confirmed via a real failed render, not a hypothetical concern.
-# Bounding the motion within BLOB_MOTION_RANGE avoids that entirely while
-# still reading as genuinely fast, continuous movement (several full
-# wobble cycles across one tile's duration) - and, as a side benefit,
-# keeps the anchor_zone-anchored blob lingering near the text zone instead
-# of sliding away from it for most of the clip.
-BLOB_MOTION_RANGE = 150
+# Blob motion bounces back and forth (via _triangle_wave, same mechanism as
+# the image pan), NOT a one-way slide - an earlier attempt at "10x faster"
+# simply multiplied the old start-to-start+drift distance by 10x, which let
+# blobs drift far enough off-frame to hit a real moviepy crash (a
+# broadcast-shape ValueError from compositing a clip whose visible region
+# had gone to zero) - confirmed via a real failed render, not a
+# hypothetical concern. Each blob now bounces across the FULL frame (0 to
+# W-diameter / H-diameter, i.e. a real "bounce off the walls" - the blob's
+# bounding box position itself never leaves those bounds, so it's actually
+# a STRICTER guarantee than the earlier smaller-range wobble, not a looser
+# one) - a small ±150px wobble around a fixed point was confirmed (by
+# direct user report) to read as "stuck in the same spot" on a 1080x1920
+# frame, not as genuine movement. Blobs never collide with or occlude one
+# another's motion - each just independently bounces on its own phase, so
+# they naturally pass through each other.
 BLOB_SPEED_PX_PER_SEC = 90  # ~10x the original implied speed (90px drift
 # over a ~10s clip works out to roughly 9px/sec)
 
@@ -372,25 +376,30 @@ def _glow_blob_clips(
     anchor_zone: tuple[float, float] | None = None,
 ):
     """NUM_BLOBS large soft glow blobs (alternating red/orange - see
-    BLOB_COLORS) that drift slowly across the frame for the tile's
-    duration - real per-frame motion (not just a static card) using only
-    originally-generated shapes. Positions/speeds are seeded per tile so
+    BLOB_COLORS) that bounce around the full frame for the tile's duration,
+    DVD-screensaver style - each blob's position independently reflects off
+    the actual frame edges (0 to W-diameter horizontally, 0 to H-diameter
+    vertically), via _triangle_wave on each axis. Blobs never check for or
+    react to one another's positions, so they naturally pass through each
+    other rather than colliding. Positions/speeds are seeded per tile so
     every tile looks a little different but is still reproducible. Count
     doubled from the original 2 to NUM_BLOBS, per explicit instruction.
 
     anchor_zone: optional (top, bottom) y-range - typically the text zone -
     that must have real, guaranteed blob coverage, for tiles where the text
     backdrop is translucent specifically so this shows through it. Without
-    this, every blob starts at a uniformly random position across the WHOLE
-    frame height (0-H); confirmed in practice that for a seed whose random
-    draw happens to land all blobs far from a given (often much smaller)
-    text zone, none ever drifts into it for the tile's whole duration -
-    since the per-story seed is fixed (story_number * 10), this isn't rare
-    bad luck that varies run to run, it reproduces every single time for
-    that story number. When given, blob 0 is deliberately centered on this
-    zone instead of the full frame, guaranteeing real overlap; the rest
-    stay randomly placed across the whole frame as before, for background
-    variety outside the text zone.
+    this, every blob bounces across the WHOLE frame height (0-H); confirmed
+    in practice that for a seed whose random draw happens to land all blobs
+    far from a given (often much smaller) text zone, none ever reaches it
+    for the tile's whole duration - since the per-story seed is fixed
+    (story_number * 10), this isn't rare bad luck that varies run to run,
+    it reproduces every single time for that story number. When given,
+    blob 0 still bounces full-width horizontally, but its VERTICAL bounce
+    range is constrained to (zone_top, zone_bottom) instead of the full
+    frame height - so its center is always somewhere within the zone,
+    guaranteeing real overlap, while still visibly moving rather than
+    sitting fixed in one spot. The rest bounce across the whole frame, for
+    background variety outside the text zone.
     """
     rng = random.Random(seed)
     clips = []
@@ -401,22 +410,23 @@ def _glow_blob_clips(
         blob_path = os.path.join(tmp_dir, f"blob_{seed}_{i}.png")
         _make_glow_blob(diameter, BLOB_COLORS[i % len(BLOB_COLORS)]).save(blob_path)
 
+        max_x = max(W - diameter, 0)
+        phase_x = rng.uniform(0, 2 * max_x) if max_x > 0 else 0
+
         if i == 0 and anchor_zone is not None:
             zone_top, zone_bottom = anchor_zone
-            zone_center_y = (zone_top + zone_bottom) / 2
-            start_x = rng.randint(0, W) - diameter // 2
-            start_y = int(zone_center_y - diameter / 2)
+            y_range = max(zone_bottom - zone_top, 0)
+            y_offset = zone_top - diameter / 2
         else:
-            start_x = rng.randint(-diameter // 2, W - diameter // 2)
-            start_y = rng.randint(-diameter // 2, H - diameter // 2)
-        phase_x = rng.uniform(0, 2 * BLOB_MOTION_RANGE)
-        phase_y = rng.uniform(0, 2 * BLOB_MOTION_RANGE)
+            y_range = max(H - diameter, 0)
+            y_offset = 0
+        phase_y = rng.uniform(0, 2 * y_range) if y_range > 0 else 0
 
         blob_clip = ImageClip(blob_path).with_duration(duration)
         blob_clip = blob_clip.with_position(
-            lambda t, sx=start_x, sy=start_y, px=phase_x, py=phase_y: (
-                sx - _triangle_wave(t, BLOB_SPEED_PX_PER_SEC, BLOB_MOTION_RANGE, px),
-                sy - _triangle_wave(t, BLOB_SPEED_PX_PER_SEC, BLOB_MOTION_RANGE, py),
+            lambda t, mx=max_x, px=phase_x, py=phase_y, yr=y_range, yo=y_offset: (
+                _triangle_wave(t, BLOB_SPEED_PX_PER_SEC, mx, px),
+                _triangle_wave(t, BLOB_SPEED_PX_PER_SEC, yr, py) + yo,
             )
         )
         clips.append(blob_clip)
@@ -1221,6 +1231,8 @@ def assemble_video(
     video_title: str = "Top News Today",
     video_subtitle: str = "",
     image_paths: list[tuple[str | None, str | None]] | None = None,
+    add_music: bool = True,
+    music_volume: float = 0.15,
 ) -> str:
     """
     stories: list of story dicts (needs at least a "title" key)
@@ -1231,6 +1243,11 @@ def assemble_video(
     image_paths: one (image_path_1, image_path_2) tuple per story - either
                  element may be None - or None to mean "no images for any
                  story". Each tile shows up to 2 real story images.
+    add_music: whether to mix in background music (see music.py) - a true
+               no-op if assets/music/ has no tracks yet, regardless of this
+               flag. Applied ONCE to the whole concatenated video, not per
+               tile, so the track plays continuously across cuts instead of
+               restarting at each one.
     """
     os.makedirs(tmp_dir, exist_ok=True)
     total = len(stories)
@@ -1291,6 +1308,8 @@ def assemble_video(
             detail_template_counter += 1
 
     final = concatenate_videoclips(clips, method="compose")
+    if add_music:
+        final = add_background_music(final, tmp_dir, volume=music_volume, seed=0)
     final.write_videofile(
         output_path,
         # 15fps, not 30: this content is static text + slow-drifting glow
@@ -1327,6 +1346,8 @@ def assemble_individual_videos(
     filename_prefix: str = "story",
     slides_per_story: int = 1,
     image_paths: list[tuple[str | None, str | None]] | None = None,
+    add_music: bool = True,
+    music_volume: float = 0.15,
 ) -> list[str]:
     """
     Builds one standalone vertical video per story. slides_per_story
@@ -1339,6 +1360,15 @@ def assemble_individual_videos(
     that tile is silent with a flat NO_AUDIO_DURATION instead of an
     audio-driven one; either every entry is None or none are, never mixed,
     since main.py generates audio for a whole run or not at all.
+
+    add_music: whether to mix in background music (see music.py) - a true
+               no-op if assets/music/ has no tracks yet, regardless of this
+               flag. Applied ONCE per story's own final clip (not per
+               tile), so the track plays continuously across that story's
+               tile cuts instead of restarting at each one. Each story
+               gets its own rotation pick (seeded by story index), so
+               consecutive stories in one run don't all land on the same
+               track.
 
     image_paths: one (image_path_1, image_path_2) tuple per story - either
                  element may be None - or None to mean "no images for any
@@ -1422,6 +1452,8 @@ def assemble_individual_videos(
                 detail_template_counter += 1
 
         final = concatenate_videoclips(clips, method="compose")
+        if add_music:
+            final = add_background_music(final, tmp_dir, volume=music_volume, seed=i)
         slug = _slugify(story["title"])
         output_path = os.path.join(output_dir, f"{filename_prefix}_{i + 1:02d}_{slug}.mp4")
         final.write_videofile(

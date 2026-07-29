@@ -3,26 +3,37 @@ Finds and downloads up to 2 real, story-specific images for a news item:
   1. The primary image - from the RSS feed's own media enclosure/thumbnail
      if fetch_news.py found one, otherwise the article page's og:image tag
      (the image the publisher itself set for social-sharing previews).
-  2. A second, genuinely different image - found by parsing the article
-     page itself for additional content images, filtering out logos, icons,
-     avatars, ads, tracking pixels, and share buttons. This is a best-effort
-     heuristic, not a guarantee: unlike og:image (a single well-defined,
-     universally-supported tag), there's no equivalently reliable convention
-     for "the second most relevant image" - site HTML structures vary
-     widely. Every candidate found on the page is tried in document order
-     (not just the first) until one downloads successfully and isn't a
-     near-duplicate of the primary (via perceptual hash,
-     images_are_near_duplicates) - a site serving the same underlying photo
-     at two different sizes/URLs is a confirmed real case, and one
-     duplicate candidate shouldn't rule out every other image on the page.
-     If every candidate is exhausted without finding a distinct one, only
-     the primary is returned (the second slot is None) rather than pasting
-     the same photo into both slots - showing one image once reads as
+  2. A second, genuinely different image - tried in two tiers, stopping at
+     the first genuinely distinct result (never a near-duplicate of the
+     primary, via perceptual hash, images_are_near_duplicates):
+       a. Same-page heuristic (fetch_story_images) - parsing the article
+          page itself for additional content images, filtering out logos,
+          icons, avatars, ads, tracking pixels, and share buttons. This is
+          a best-effort heuristic, not a guarantee: unlike og:image (a
+          single well-defined, universally-supported tag), there's no
+          equivalently reliable convention for "the second most relevant
+          image" - site HTML structures vary widely.
+       b. Already-known other outlets (main.py, via
+          fetch_second_image_from_candidates) - for a story multiple
+          outlets already covered (see fetch_news.py's significance-
+          ranking merge), each other outlet's OWN og:image is a genuinely
+          different real photo for the same story, free of any new search.
+          (A third tier - a live Google News search for other coverage -
+          was tried and dropped: Google News' search-result links are
+          JS-redirect pages a plain HTTP request can't resolve to the real
+          publisher page, so every candidate it produced only ever yielded
+          Google's own tiny interstitial thumbnail, confirmed via direct
+          testing.)
+     If both tiers are exhausted without finding a distinct image, only the
+     primary is returned (the second slot is None) rather than pasting the
+     same photo into both slots - showing one image once reads as
      deliberate; showing it twice reads as an obvious, lazy-looking repeat.
 
 Every image sourced this way should get a quick human glance before a video
 posts (confirm it's genuinely the right image for the story) - this is even
-more true for the second image than the first, given the heuristic involved.
+more true for the second image than the first, given how much heuristic
+matching (same-page or cross-article) goes into finding it, whichever tier
+actually produced it.
 """
 import os
 import re
@@ -319,6 +330,41 @@ def fetch_story_images(
         return fallback_path, None
 
     return None, None
+
+
+def fetch_second_image_from_candidates(
+    candidate_urls: list[str], primary_path: str, output_path_2: str
+) -> str | None:
+    """
+    Cross-article second-image fallback: tries each of `candidate_urls` -
+    OTHER ARTICLES about this same story, not more images within the
+    already-tried page - in order, using find_image_url to grab THAT
+    article's own primary photo (its own og:image/media_url), not a
+    same-page "second image" search. A different article's own main photo
+    is already a genuinely distinct real photo for this story, so no
+    same-page heuristic is needed here.
+
+    Downloads and checks each candidate the same way the same-page loop in
+    fetch_story_images does - must meet MIN_IMAGE_WIDTH/MIN_IMAGE_HEIGHT
+    (_meets_min_resolution) and must NOT be a near-duplicate of
+    `primary_path` (images_are_near_duplicates) - skipping duplicates,
+    undersized images, and download failures alike. Returns the first
+    genuinely distinct, sufficiently large image found, or None if every
+    candidate is exhausted.
+    """
+    for candidate_url in candidate_urls:
+        candidate_image_url = find_image_url(None, candidate_url)
+        if not candidate_image_url:
+            continue
+        candidate_path = download_image(candidate_image_url, output_path_2)
+        if not candidate_path:
+            continue
+        if not _meets_min_resolution(candidate_path):
+            continue
+        if images_are_near_duplicates(primary_path, candidate_path):
+            continue
+        return candidate_path
+    return None
 
 
 if __name__ == "__main__":
